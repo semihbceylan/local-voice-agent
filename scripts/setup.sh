@@ -34,15 +34,33 @@ else
 fi
 
 echo "==> Checking the local tooling"
-for tool in ffmpeg node; do
-  if command -v "$tool" >/dev/null 2>&1; then
-    echo "    $tool: $(command -v "$tool")"
+MISSING=""
+
+check_tool() {
+  local name="$1" hint="$2" path="${3:-}"
+  local found=""
+  if [ -n "$path" ]; then
+    [ -x "$path" ] && found="$path"
   else
-    echo "    WARNING: $tool is not installed (macOS: brew install ffmpeg node)"
+    found="$(command -v "$name" 2>/dev/null || true)"
   fi
-done
+  if [ -n "$found" ]; then
+    echo "    $name: $found"
+  else
+    echo "    MISSING: $name ($hint)"
+    MISSING="$MISSING $name"
+  fi
+}
+
+check_tool ffmpeg "macOS: brew install ffmpeg"
+check_tool curl "needed to download the model"
+check_tool node "needed for the parser tests, macOS: brew install node"
+check_tool whisper-cli "whisper.cpp, needed for the speech recognition" \
+  "${WHISPER_CLI:-/opt/homebrew/bin/whisper-cli}"
+
 if [ ! -d /Applications/Ollama.app ] && ! command -v ollama >/dev/null 2>&1; then
-  echo "    WARNING: Ollama was not found. The n8n workflow needs it for general questions."
+  # Only the n8n workflow needs Ollama, the client and the tests do not.
+  echo "    WARNING: ollama was not found. The n8n workflow needs it for general questions."
 fi
 
 cat <<'EOF'
@@ -54,3 +72,10 @@ Done. Next steps:
   .venv/bin/python voice_agent.py
 
 EOF
+
+if [ -n "$MISSING" ]; then
+  echo "Missing tools:$MISSING" >&2
+  echo "The voice agent needs ffmpeg, curl and whisper-cli; the test suite" >&2
+  echo "additionally needs node. See docs/troubleshooting.md." >&2
+  exit 1
+fi

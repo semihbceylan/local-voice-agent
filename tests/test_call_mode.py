@@ -43,13 +43,19 @@ def make_wav(path: Path, seconds: float, db: float = -70.0, seed: int = 3) -> No
 
 
 class CallModeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.speech = speech_fixture()
+        except Exception as exc:  # noqa: BLE001
+            raise unittest.SkipTest(f"no speech fixture available: {exc}")
+
     def test_vad_stream_produces_turn_after_turn(self):
         """The same stream must deliver one utterance after the other."""
         cfg = va.Config()
         cfg.vad_silence_ms = 500
         stream = VadStream(cfg)
-        speech = FIXTURES / "speech_only.wav"
-        with wave.open(str(speech), "rb") as wav:
+        with wave.open(str(self.speech), "rb") as wav:
             data = wav.readframes(wav.getnframes())
         frame_bytes = int(16000 * va.FRAME_MS / 1000) * 2
         frames = [data[i:i + frame_bytes] for i in range(0, len(data) - frame_bytes + 1, frame_bytes)]
@@ -72,7 +78,7 @@ class CallModeTests(unittest.TestCase):
         cfg = va.Config()
         cfg.vad_silence_ms = 500
         stream = VadStream(cfg)
-        with wave.open(str(FIXTURES / "speech_only.wav"), "rb") as wav:
+        with wave.open(str(self.speech), "rb") as wav:
             data = wav.readframes(wav.getnframes())
         frame_bytes = int(16000 * va.FRAME_MS / 1000) * 2
         frames = [data[i:i + frame_bytes] for i in range(0, len(data) - frame_bytes + 1, frame_bytes)]
@@ -145,7 +151,7 @@ class CallModeTests(unittest.TestCase):
         va.send_to_n8n = fake_n8n
         va.play_audio = fake_play
 
-        source = va.WavFrameSource(cfg, str(speech_fixture()), loop=True, realtime=False)
+        source = va.WavFrameSource(cfg, str(self.speech), loop=True, realtime=False)
 
         # Stop after two turns.
         original = va.KokoroTTS.synthesize
@@ -208,7 +214,7 @@ class CallModeTests(unittest.TestCase):
         va.KokoroTTS.synthesize = fake_synth
         try:
             source = va.WavFrameSource(
-                cfg, str(speech_fixture()), loop=True, realtime=False
+                cfg, str(self.speech), loop=True, realtime=False
             )
             va.run_call(cfg, source=source, play=True)
         finally:

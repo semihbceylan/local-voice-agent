@@ -94,6 +94,13 @@ def transcribe(path: Path, prompt=None) -> tuple[str, float]:
 
 
 def main():
+    model = ROOT / "ggml-base.en.bin"
+    if not model.exists():
+        print(
+            "skipped: the Whisper model is missing. Run ./scripts/setup.sh "
+            "or download ggml-base.en.bin."
+        )
+        return 0
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--keep-audio", default=None, help="directory for the generated wav files")
@@ -128,8 +135,8 @@ def main():
                 (target / f"case_{index}.wav").write_bytes(wav.read_bytes())
 
     print(f"\n  {len(CASES) - failures} passed, {failures} failed")
-    sys.exit(1 if failures else 0)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

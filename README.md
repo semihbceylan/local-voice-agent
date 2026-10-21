@@ -67,6 +67,7 @@ credential and the webhook.
 ## Repository layout
 
 ```
+README.md  LICENSE  requirements.txt  .env.example  .github/
 voice_agent.py             client: capture, transcription, playback, call loop
 vad_stream.py              resumable voice activity detection
 farewell.py                goodbye detection
@@ -92,16 +93,21 @@ docs/                      architecture, n8n setup, troubleshooting
 | Suite | What it covers |
 |---|---|
 | `tests/parser/` | the order parser, run with `node --test` against the file that is embedded into the workflow |
+| `tests/test_workflow_build.py` | guard: the committed workflow has to match the builder and must not contain a secret |
+| `tests/fixtures_gen.py` | generates the speech fixture locally with Kokoro, so no microphone recording is published |
 | `tests/test_vad.py` | the endpointer: threshold, noise floor, pauses, start clipping, breakdown |
 | `tests/test_call_mode.py` | the continuous call loop, turn after turn, hanging up on a goodbye |
 | `tests/test_farewell.py` | goodbye detection and the phrases that must not trigger it |
 | `tests/stt_reliability.py` | synthesised speech -> whisper.cpp -> parser |
 | `tests/test_integration.py` | end to end over HTTP against freshly created isolated n8n workflows |
 | `tests/live_mic_test.py` | the physical microphone test, prints the timing of every stage |
+| `tests/record_sample.py`, `tests/analyse_sample.py` | record a raw microphone sample and analyse it |
 
-The suites that need a microphone or an n8n instance are skipped when they
-are not available. No recording of a real microphone is part of this
-repository; the speech fixture is generated locally with Kokoro.
+A suite that needs something that is not there skips itself instead of
+failing: the microphone test needs a microphone, the speech fixture needs
+Kokoro and the recognition test needs the Whisper model
+(`./scripts/setup.sh` downloads it). No recording of a real microphone is
+part of this repository; the speech fixture is generated locally with Kokoro.
 
 ## Configuration
 

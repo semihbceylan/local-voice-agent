@@ -31,6 +31,17 @@ jobs:
       - name: Install ffmpeg
         run: brew install ffmpeg
 
+      - name: Download the Whisper model
+        # The model is 141 MB and not part of the repository.
+        run: |
+          curl -fL --progress-bar -o ggml-base.en.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+
+      - name: Prepare the speech fixture
+        # The fixture is generated locally with Kokoro, so no recording of a
+        # real microphone is part of the repository.
+        run: python tests/fixtures_gen.py
+
       - name: Order parser
         run: node --test tests/parser/
 
@@ -42,3 +53,9 @@ jobs:
 
       - name: Farewell detection
         run: python tests/test_farewell.py
+
+      - name: Workflow build guard
+        run: python tests/test_workflow_build.py
+
+      - name: Speech recognition reliability
+        run: python tests/stt_reliability.py

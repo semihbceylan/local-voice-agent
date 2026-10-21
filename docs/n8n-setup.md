@@ -55,6 +55,19 @@ or create a second one:
 The generator writes `workflows/voice_agent_production.json`, which is also
 the file to import by hand through the n8n UI.
 
+The identifiers of your instance can be set as well, they are only needed
+when the workflow is built for a different n8n:
+
+| Variable | Meaning |
+|---|---|
+| `N8N_DATA_TABLE_ID` | id of the `customer_orders` Data Table |
+| `N8N_OLLAMA_CREDENTIAL_ID` | id of the Ollama credential of the AI Agent |
+| `N8N_WEBHOOK_PATH` | path of the webhook, `voice-agent` by default |
+
+The deploy script keeps the webhook id of the workflow that is already
+deployed, makes sure the workflow ends up active and verifies that the
+webhook answers afterwards.
+
 ## 5. The webhook
 
 The workflow answers on `POST /webhook/voice-agent` with:

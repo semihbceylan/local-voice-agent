@@ -7,6 +7,10 @@
 # because the model file is 141 MB and does not belong in the repository.
 
 mlx-audio[tts]==0.6.1
+# The phonemiser for the Kokoro voices. mlx-audio does not declare it, so
+# without it the text to speech engine cannot turn text into audio and the
+# tests that generate speech fail.
+misaki[en]==0.9.4
 numpy==2.3.5
 requests==2.34.2
 soundfile==0.14.0

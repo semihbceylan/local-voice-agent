@@ -120,6 +120,10 @@ given as command line flags (`voice_agent.py --help`).
 | `VAD_FLATNESS_DB` | `2` | level change below which a frame counts as steady |
 | `VAD_EMA_ALPHA` | `0.4` | smoothing of the level tracker |
 | `VAD_SNR_ARM_DB` | `20` | below this signal to noise ratio the safety net is armed |
+| `VAD_SNR_GAP_DB` | `12` | how far below the speech level a frame counts as silence |
+| `VAD_START_FRAMES` | `3` | voiced frames that confirm the start of speech |
+| `VAD_NO_SPEECH_TIMEOUT_S` | `8` | give up when nobody starts talking |
+| `VAD_CONFLICT_FRAMES` | `20` | sustained disagreement between the VAD and the level before the safety net takes over |
 | `VAD_PREROLL_MS` | `300` | audio kept before the onset |
 | `VAD_KEEP_TRAILING_SILENCE_MS` | `200` | silence kept after the last word |
 | `PTT_DURATION` | `5` | length of a fixed recording |
@@ -129,8 +133,14 @@ given as command line flags (`voice_agent.py --help`).
 | `KOKORO_REPO` | `mlx-community/Kokoro-82M-bf16` | the voice model |
 | `KOKORO_VOICE` | `af_heart` | the voice |
 | `KOKORO_SPEED` | `1.0` | speaking rate |
+| `KOKORO_LANG` | `a` | language code of the voice |
+| `N8N_TIMEOUT_S` | `60` | timeout of the webhook request |
+| `PLAYBACK_TIMEOUT_S` | `120` | timeout of the audio playback |
+| `VOICE_MODE` | `call` | `call`, `arm` or `ptt` |
 | `OUTPUT_DEVICE` | *(empty)* | play the answer on this device |
 | `BARGE_IN` | `0` | allow the customer to interrupt |
+| `BARGE_IN_DB` | `8` | how far above the echo the voice has to be to interrupt |
+| `BARGE_IN_MS` | `250` | how long that has to last to count as an interruption |
 | `FAREWELL_ENABLED` | `1` | end the call on a goodbye |
 | `FAREWELL_LINE` | *(built in)* | what the agent says when hanging up |
 | `LATENCY_LOG` | `logs/latency.jsonl` | per turn timings |
