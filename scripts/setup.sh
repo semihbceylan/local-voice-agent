@@ -22,7 +22,7 @@ if [ ! -d "$VENV" ]; then
   python3 -m venv "$VENV"
 fi
 "$VENV/bin/python" -m pip install --upgrade pip >/dev/null
-"$VENV/bin/pip" install -r requirements.txt
+"$VENV/bin/python" -m pip install -r requirements.txt
 
 echo "==> Whisper model"
 if [ -f "$MODEL" ]; then
