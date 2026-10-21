@@ -35,6 +35,7 @@ run "order parser (node --test)"        node --test tests/parser/
 run "voice activity detection"          "$PY" tests/test_vad.py
 run "call mode"                         "$PY" tests/test_call_mode.py
 run "farewell detection"                "$PY" tests/test_farewell.py
+run "workflow build guard"              "$PY" tests/test_workflow_build.py
 run "speech recognition reliability"    "$PY" tests/stt_reliability.py
 
 if [ -n "${N8N_API_KEY:-}" ]; then

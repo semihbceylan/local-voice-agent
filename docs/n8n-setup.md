@@ -42,7 +42,7 @@ The workflow is generated, not edited by hand:
 ```bash
 export N8N_API_KEY=n8n_api_...
 export N8N_BASE_URL=http://localhost:5678
-export N8N_WORKFLOW_ID=nPLoCe6uuit1oMqs   # an existing workflow
+export N8N_WORKFLOW_ID=<your workflow id>   # an existing workflow
 ./scripts/deploy_workflow.sh
 ```
 

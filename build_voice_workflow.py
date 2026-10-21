@@ -18,8 +18,22 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 PARSER_SOURCE = BASE_DIR / "workflow" / "extract_order_id.js"
 
-TABLE_ID = "RavtVTN9w9NPZFuZ"
-OLLAMA_CREDENTIAL = {"ollamaApi": {"id": "VizCi15LZHPUuqzo", "name": "Ollama account"}}
+def _env(name: str, default: str) -> str:
+    import os
+
+    value = os.environ.get(name)
+    return value if value not in (None, "") else default
+
+
+# Identifiers of the n8n instance this workflow is built for. They are not
+# secrets, but they are instance specific, so they can be overridden.
+TABLE_ID = _env("N8N_DATA_TABLE_ID", "RavtVTN9w9NPZFuZ")
+OLLAMA_CREDENTIAL = {
+    "ollamaApi": {
+        "id": _env("N8N_OLLAMA_CREDENTIAL_ID", "VizCi15LZHPUuqzo"),
+        "name": "Ollama account",
+    }
+}
 
 
 def load_parser_source() -> str:
@@ -297,8 +311,9 @@ def node(name, node_type, version, position, parameters, **extra):
     return data
 
 
-def build(webhook_path, table_id=TABLE_ID, webhook_id=None):
+def build(webhook_path, table_id=TABLE_ID, webhook_id=None, credential=None):
     webhook_id = webhook_id or str(uuid.uuid4())
+    credential = credential or OLLAMA_CREDENTIAL
 
     nodes = [
         node(
@@ -481,7 +496,7 @@ def build(webhook_path, table_id=TABLE_ID, webhook_id=None):
             "Ollama Chat Model", "@n8n/n8n-nodes-langchain.lmChatOllama", 1,
             [1100, 260],
             {"model": "qwen3:4b-instruct", "options": {}},
-            credentials=OLLAMA_CREDENTIAL,
+            credentials=credential,
         ),
         node(
             "Simple Memory", "@n8n/n8n-nodes-langchain.memoryBufferWindow", 1.4,
@@ -626,6 +641,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--webhook-path", default="voice-agent")
     parser.add_argument("--table-id", default=TABLE_ID)
+    parser.add_argument(
+        "--ollama-credential-id", default=OLLAMA_CREDENTIAL["ollamaApi"]["id"],
+        help="n8n credential id of the Ollama account",
+    )
     parser.add_argument("--webhook-id", default=None)
     parser.add_argument("--name", default=None)
     parser.add_argument(
@@ -638,7 +657,15 @@ def main():
     if args.parser_test:
         workflow = build_parser_test_workflow(args.webhook_path, args.webhook_id)
     else:
-        workflow = build(args.webhook_path, args.table_id, args.webhook_id)
+        credential = {
+            "ollamaApi": {
+                "id": args.ollama_credential_id,
+                "name": OLLAMA_CREDENTIAL["ollamaApi"]["name"],
+            }
+        }
+        workflow = build(
+            args.webhook_path, args.table_id, args.webhook_id, credential
+        )
     if args.name:
         workflow["name"] = args.name
     with open(args.out, "w", encoding="utf-8") as fh:

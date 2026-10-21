@@ -15,7 +15,7 @@ cd "$ROOT"
 
 BASE_URL="${N8N_BASE_URL:-http://localhost:5678}"
 WEBHOOK_PATH="${N8N_WEBHOOK_PATH:-voice-agent}"
-WORKFLOW_ID="${N8N_WORKFLOW_ID:-nPLoCe6uuit1oMqs}"
+WORKFLOW_ID="${N8N_WORKFLOW_ID:-}"
 OUT="$ROOT/workflows/voice_agent_production.json"
 
 if [ -z "${N8N_API_KEY:-}" ]; then
@@ -38,6 +38,10 @@ if [ "${1:-}" = "--new" ]; then
     --data-binary @"$OUT" \
     | "$PY" -c 'import json,sys; w=json.load(sys.stdin); print("created workflow", w.get("id"), w.get("name"))'
 else
+  if [ -z "$WORKFLOW_ID" ]; then
+    echo "N8N_WORKFLOW_ID is not set (or use --new to create a workflow)." >&2
+    exit 1
+  fi
   curl -sS -X PUT "$BASE_URL/api/v1/workflows/$WORKFLOW_ID" \
     -H "X-N8N-API-KEY: $N8N_API-KEY" -H 'Content-Type: application/json' \
     --data-binary @"$OUT" \
