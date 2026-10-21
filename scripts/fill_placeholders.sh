@@ -49,9 +49,11 @@ text = text.replace(
     "git clone <this repository>",
     f"git clone git@github.com:{user}/{repo}.git",
 )
+text = text.replace("cd <repo-name>", f"cd {repo}")
 readme.write_text(text)
 print(f"    LICENSE  copyright holder: {name}")
 print(f"    README   clone url:          git@github.com:{user}/{repo}.git")
+print(f"    README   directory:          {repo}")
 PY
 
 echo "==> Setting the git identity for this repository"
