@@ -304,7 +304,9 @@ def node(name, node_type, version, position, parameters, **extra):
         "type": node_type,
         "typeVersion": version,
         "position": position,
-        "id": str(uuid.uuid4()),
+        # Derived from the node name, so that rebuilding the workflow produces
+        # the same file and the committed copy does not drift.
+        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"demoshop-voice-agent/{name}")),
         "name": name,
     }
     data.update(extra)
@@ -312,7 +314,9 @@ def node(name, node_type, version, position, parameters, **extra):
 
 
 def build(webhook_path, table_id=TABLE_ID, webhook_id=None, credential=None):
-    webhook_id = webhook_id or str(uuid.uuid4())
+    webhook_id = webhook_id or str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"demoshop-voice-agent/{webhook_path}")
+    )
     credential = credential or OLLAMA_CREDENTIAL
 
     nodes = [
@@ -585,7 +589,9 @@ def build_parser_test_workflow(webhook_path: str, webhook_id=None) -> dict:
     It embeds the same parser source as the production workflow, so the
     integration tests exercise the code that really runs in n8n.
     """
-    webhook_id = webhook_id or str(uuid.uuid4())
+    webhook_id = webhook_id or str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"demoshop-voice-agent/{webhook_path}")
+    )
 
     nodes = [
         node(
