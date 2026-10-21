@@ -35,8 +35,8 @@ you speak  ->  ffmpeg + WebRTC VAD  ->  whisper.cpp  ->  n8n (Ollama)  ->  Kokor
 ## Quick start
 
 ```bash
-git clone <this repository>
-cd <repo-name>
+git clone git@github.com:semihbceylan/local-voice-agent.git
+cd local-voice-agent
 ./scripts/setup.sh          # virtualenv, dependencies, Whisper model
 cp .env.example .env        # add your n8n API key
 .venv/bin/python voice_agent.py
