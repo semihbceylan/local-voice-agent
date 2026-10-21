@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# The Whisper model (141 MB) - scripts/setup.sh downloads it
+ggml-*.bin
+*.wav
+
+# Runtime data: transcripts, latency logs, microphone recordings
+logs/
+output/
+
+# Historical workflow snapshots (the current one lives in workflows/)
+backups/
+
+# Locally generated workflow exports
+test_workflow_*.json
+test_workflow_id.txt
+
+# Editor and OS
+.idea/
+.vscode/
+*.swp

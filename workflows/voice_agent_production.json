@@ -1,0 +1,589 @@
+{
+  "name": "DemoShop Voice Agent API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "850cf6c7-fcbd-44cf-9809-b557d885985a",
+      "name": "Voice Agent Webhook",
+      "webhookId": "voice-agent-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// Normalize and validate the webhook payload. Always returns one item.\nconst out = [];\nfor (const item of $input.all()) {\n  const body = item.json && item.json.body && typeof item.json.body === 'object'\n    ? item.json.body\n    : {};\n\n  let chatInput = typeof body.chatInput === 'string' ? body.chatInput : '';\n  chatInput = chatInput.replace(/\\s+/g, ' ').trim().slice(0, 1000);\n\n  let sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';\n  sessionId = sessionId.slice(0, 128) || 'anonymous';\n\n  out.push({ json: { chatInput, sessionId } });\n}\nreturn out;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "id": "aca78ed9-b742-47c7-a9ad-b9e96139e9c9",
+      "name": "Normalize Input"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * Order-number extraction for the DemoShop voice agent.\n *\n * Single source of truth: this file is embedded verbatim into the n8n\n * \"Extract Order ID\" Code node by build_voice_workflow.py, and it is unit\n * tested directly with Node (tests/parser/extract_order_id.test.js).\n *\n * Design goals\n *  - Recover compound spoken numbers (\"1,000 and 1\" -> 1001) only when the\n *    compound is grammatically unambiguous.\n *  - Never guess between different order IDs: multiple different IDs, or\n *    leftover numeric fragments, produce a clarification request.\n *  - Distinguish a confident miss (confidence \"exact\") from an uncertain\n *    interpretation (confidence \"recovered\").\n *\n * Routes returned:\n *   empty      - no usable input\n *   general    - no order number detected, hand over to the LLM\n *   order      - exactly one order ID (orderId is set)\n *   ambiguous  - two or more different order IDs\n *   uncertain  - numeric fragments that cannot be interpreted safely\n */\n\n'use strict';\n\nconst NUMBER_WORDS = {\n  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,\n  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,\n  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,\n  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,\n  seventy: 70, eighty: 80, ninety: 90\n};\n\nconst NUMBER_SCALES = { hundred: 100, thousand: 1000, million: 1000000 };\n\nconst WORD_ALTERNATION =\n  Object.keys(NUMBER_WORDS).join('|') + '|hundred|thousand|million';\n\nconst WORD_SEQUENCE_RE = new RegExp(\n  '(?:' + WORD_ALTERNATION + ')(?:[\\\\s-]+(?:and[\\\\s-]+)?(?:' + WORD_ALTERNATION + '))*',\n  'gi'\n);\n\n/**\n * Words that may sit between the order context (\"order\", \"check\", ...) and\n * the number itself. Anything else (for example \"from 2026\" or \"price of\n * 100 phones\") means the number is not an order ID.\n */\nconst ALLOWED_GAP_WORDS = new Set([\n  'is', 'are', 'was', 'were', 'be', 'been', 'has', 'have', 'had',\n  'the', 'a', 'an', 'my', 'our', 'your',\n  'number', 'no', 'id', 'order', 'orders', 'status', 'ref', 'reference',\n  'for', 'of', 'it', 'that', 'this', 'i', 'we', 'you',\n  'want', 'need', 'like', 'just', 'also', 'and', 'or', 'please',\n  'check', 'shipment', 'package', 'parcel', 'tracking'\n]);\n\n/** Filler words ignored when deciding that a message is \"only a number\". */\nconst FILLER_WORDS = new Set([\n  'my', 'the', 'order', 'orders', 'number', 'no', 'id', 'is', 'are', 'was',\n  'please', 'check', 'it', 'for', 'a', 'an', 'of', 'and', 'or',\n  'hi', 'hello', 'yes', 'ok', 'okay', 'thanks', 'thank', 'you'\n]);\n\n/** Context words that introduce an order number. */\nconst CONTEXT_RE = new RegExp(\n  '(?:orders?\\\\b|order\\\\s+(?:id|number|no\\\\.?)\\\\b|#\\\\b|shipment|package|parcel|' +\n  'check\\\\b|status\\\\s+of|what\\\\s+about|where\\\\s+is\\\\s+my\\\\b)',\n  'gi'\n);\n\n/** Connector between the two parts of a compound number. */\nconst COMPOUND_CONNECTOR_RE =\n  /^\\s*(?:,)?\\s*(?:and|&|\\+|plus)\\s*(?:a\\s+|an\\s+|the\\s+)?$/;\n\n/** Words that may separate two numbers that share the same order context. */\nconst CONNECTOR_TOKENS = new Set(['and', 'a', 'an', 'the', 'plus']);\n\n/** A stray number this close to the order number makes the reading unsafe. */\nconst ADJACENCY_WINDOW = 12;\n\nconst MAX_GAP_LENGTH = 30;\n\nfunction normalizeText(rawText) {\n  let text = String(rawText == null ? '' : rawText).toLowerCase();\n  text = text.replace(/[\\u2010-\\u2015]/g, '-');\n  text = text.replace(/\\s+/g, ' ').trim();\n\n  // Whisper homophones that matter when a number follows.\n  text = text.replace(/\\bolder\\b/g, 'order');\n  text = text.replace(/\\boder\\b/g, 'order');\n  text = text.replace(/\\bordor\\b/g, 'order');\n\n  // \"1,001\" and \"1 , 001\" both become \"1001\".\n  for (let pass = 0; pass < 3; pass++) {\n    const before = text;\n    text = text.replace(/(\\d)\\s*,\\s*(\\d{3})(?!\\d)/g, '$1$2');\n    text = text.replace(/(\\d),(?=\\d{3}(?!\\d))/g, '$1');\n    if (text === before) break;\n  }\n  return text;\n}\n\nfunction parseNumberWords(segment) {\n  const tokens = segment\n    .toLowerCase()\n    .replace(/[^a-z\\s-]/g, ' ')\n    .split(/[\\s-]+/)\n    .filter(Boolean);\n\n  let total = 0;\n  let current = 0;\n  let sawNumber = false;\n\n  for (const token of tokens) {\n    if (token === 'and') continue;\n    if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, token)) {\n      current += NUMBER_WORDS[token];\n      sawNumber = true;\n    } else if (Object.prototype.hasOwnProperty.call(NUMBER_SCALES, token)) {\n      const scale = NUMBER_SCALES[token];\n      if (scale === 100) {\n        current = (current || 1) * scale;\n      } else {\n        total += (current || 1) * scale;\n        current = 0;\n      }\n      sawNumber = true;\n    } else {\n      return null;\n    }\n  }\n  return sawNumber ? total + current : null;\n}\n\nfunction collectMentions(text) {\n  const mentions = [];\n\n  // Digit runs, including 1-2 digit runs that may complete a compound.\n  const digitRe = /\\d+/g;\n  let match;\n  while ((match = digitRe.exec(text)) !== null) {\n    const digits = match[0];\n    if (digits.length > 8) continue;\n    mentions.push({\n      start: match.index,\n      end: match.index + digits.length,\n      value: parseInt(digits, 10),\n      form: 'digits'\n    });\n  }\n\n  // Spoken number sequences, for example \"one thousand and one\".\n  const wordRe = new RegExp(WORD_SEQUENCE_RE.source, 'gi');\n  while ((match = wordRe.exec(text)) !== null) {\n    const value = parseNumberWords(match[0]);\n    if (value === null) continue;\n    mentions.push({\n      start: match.index,\n      end: match.index + match[0].length,\n      value: value,\n      form: 'words'\n    });\n  }\n\n  mentions.sort((a, b) => a.start - b.start || b.end - a.end);\n\n  // Drop word mentions fully covered by a longer word mention.\n  const filtered = [];\n  for (const mention of mentions) {\n    const covered = filtered.some(\n      (other) => other.form === 'words' && other.start <= mention.start && other.end >= mention.end\n    );\n    if (!covered) filtered.push(mention);\n  }\n  return filtered;\n}\n\nfunction collectContexts(text) {\n  const contexts = [];\n  const re = new RegExp(CONTEXT_RE.source, 'gi');\n  let match;\n  while ((match = re.exec(text)) !== null) {\n    contexts.push({ start: match.index, end: match.index + match[0].length });\n  }\n  return contexts;\n}\n\nfunction gapIsAllowed(gap) {\n  if (gap.length > MAX_GAP_LENGTH) return false;\n  if (/\\d/.test(gap)) return false;\n  const words = gap.replace(/[^a-z\\s]/g, ' ').split(/\\s+/).filter(Boolean);\n  return words.every((word) => ALLOWED_GAP_WORDS.has(word));\n}\n\nfunction isInContext(text, contexts, mention) {\n  let best = null;\n  for (const context of contexts) {\n    if (context.end <= mention.start) best = context;\n  }\n  if (!best) return false;\n  return gapIsAllowed(text.slice(best.end, mention.start));\n}\n\n/**\n * A number that directly follows another number with nothing but a connector\n * in between (\"order 1000 and 100\") belongs to the same order context.\n */\nfunction inheritsContext(text, mention, contextualMentions) {\n  for (const other of contextualMentions) {\n    let gap;\n    if (other.end <= mention.start) gap = text.slice(other.end, mention.start);\n    else if (mention.end <= other.start) gap = text.slice(mention.end, other.start);\n    else continue;\n    if (gap.length > 12) continue;\n    const words = gap.replace(/[^a-z\\s]/g, ' ').split(/\\s+/).filter(Boolean);\n    if (words.every((word) => CONNECTOR_TOKENS.has(word))) return true;\n  }\n  return false;\n}\n\n/** True when the message is essentially only a number (\"1,001\", \"1,000 and 1\"). */\nfunction isNumericOnlyText(text, mentions) {\n  if (mentions.length === 0 || mentions.length > 2) return false;\n  let rest = text;\n  for (const mention of mentions) {\n    rest = rest.slice(0, mention.start) + ' ' + rest.slice(mention.end);\n  }\n  const words = rest.replace(/[^a-z\\s]/g, ' ').split(/\\s+/).filter(Boolean);\n  return words.every((word) => FILLER_WORDS.has(word));\n}\n\nfunction isCompoundConnector(gap) {\n  return COMPOUND_CONNECTOR_RE.test(gap);\n}\n\n/**\n * @param {string} rawText\n * @returns {{route:string, orderId:string, candidates:Array, confidence:string, clarification:string}}\n */\nfunction extractOrderIds(rawText) {\n  const text = normalizeText(rawText);\n  const result = {\n    route: 'general',\n    orderId: '',\n    candidates: [],\n    confidence: 'none',\n    clarification: ''\n  };\n\n  if (!text) {\n    result.route = 'empty';\n    result.clarification =\n      \"I didn't catch a question. Please tell me your order number or ask a support question.\";\n    return result;\n  }\n\n  const mentions = collectMentions(text);\n  const contexts = collectContexts(text);\n  const numericOnly = isNumericOnlyText(text, mentions);\n\n  for (const mention of mentions) {\n    mention.inContext = numericOnly || isInContext(text, contexts, mention);\n  }\n\n  // Numbers that follow an in-context number with only a connector in\n  // between belong to the same order context.\n  const direct = mentions.filter((mention) => mention.inContext);\n  for (const mention of mentions) {\n    if (mention.inContext) continue;\n    if (inheritsContext(text, mention, direct)) mention.inContext = true;\n  }\n\n  const contextual = mentions.filter((mention) => mention.inContext);\n\n  // Group mentions into numbers. Two mentions form a compound number only\n  // when they are joined by \"and\" and the first is an exact multiple of 1000\n  // (\"1,000 and 1\" -> 1001). Anything else stays separate.\n  const groups = [];\n  for (const mention of contextual) {\n    const last = groups[groups.length - 1];\n    if (\n      last &&\n      last.form !== 'compound' &&\n      last.value % 1000 === 0 &&\n      last.value >= 1000 &&\n      mention.value >= 1 &&\n      mention.value <= 99 &&\n      isCompoundConnector(text.slice(last.end, mention.start))\n    ) {\n      last.end = mention.end;\n      last.value = last.value + mention.value;\n      last.form = 'compound';\n    } else {\n      groups.push({\n        start: mention.start,\n        end: mention.end,\n        value: mention.value,\n        form: mention.form\n      });\n    }\n  }\n\n  const idGroups = groups.filter((group) => group.value >= 100 && group.value <= 99999999);\n  const fragments = groups.filter((group) => group.value < 100);\n\n  const distinct = [];\n  for (const group of idGroups) {\n    if (!distinct.some((other) => other.value === group.value)) distinct.push(group);\n  }\n\n  result.candidates = distinct.map((group) => ({\n    value: String(group.value),\n    form: group.form,\n    confidence: group.form === 'compound' ? 'recovered' : 'exact'\n  }));\n\n  if (distinct.length === 1) {\n    const group = distinct[0];\n    // A small number sitting right next to the order number (\"order 1000 at\n    // 1\") means the transcription was not understood safely.\n    const stray = mentions.filter((mention) => {\n      if (mention.value < 1 || mention.value >= 100) return false;\n      if (mention.start >= group.start && mention.end <= group.end) return false;\n      const distance =\n        mention.start >= group.end\n          ? mention.start - group.end\n          : group.start - mention.end;\n      return distance <= ADJACENCY_WINDOW;\n    });\n    if (fragments.length > 0 || stray.length > 0) {\n      result.route = 'uncertain';\n      result.confidence = 'uncertain';\n      result.clarification =\n        'I want to make sure I have your order number right. Could you repeat the order number, please?';\n      return result;\n    }\n    result.route = 'order';\n    result.orderId = String(group.value);\n    result.confidence = group.form === 'compound' ? 'recovered' : 'exact';\n    return result;\n  }\n\n  if (distinct.length > 1) {\n    result.route = 'ambiguous';\n    result.confidence = 'ambiguous';\n    result.clarification =\n      'I found more than one possible order number (' +\n      result.candidates.map((candidate) => candidate.value).join(', ') +\n      '). Which order would you like me to check?';\n    return result;\n  }\n\n  if (fragments.length > 0) {\n    result.route = 'uncertain';\n    result.confidence = 'uncertain';\n    result.clarification =\n      'I want to make sure I have your order number right. Could you repeat the order number, please?';\n    return result;\n  }\n\n  result.route = 'general';\n  result.confidence = 'none';\n  return result;\n}\n\n/** Adapter used by the n8n Code node. */\nfunction runN8nNode(input) {\n  const chatInput = String((input && input.chatInput) || '');\n  const sessionId = String((input && input.sessionId) || 'anonymous');\n  const parsed = extractOrderIds(chatInput);\n  return {\n    chatInput: chatInput,\n    sessionId: sessionId,\n    orderId: parsed.orderId,\n    candidates: parsed.candidates.map((candidate) => candidate.value),\n    candidateDetails: parsed.candidates,\n    route: parsed.route,\n    confidence: parsed.confidence,\n    clarification: parsed.clarification\n  };\n}\n\n// n8n Code node entry point. Node.js unit tests fall through to module.exports.\nif (typeof $input !== 'undefined' && $input && typeof $input.first === 'function') {\n  const source = $input.first();\n  return [{ json: runN8nNode((source && source.json) || {}) }];\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = {\n    extractOrderIds: extractOrderIds,\n    runN8nNode: runN8nNode,\n    _internals: {\n      normalizeText: normalizeText,\n      collectMentions: collectMentions,\n      collectContexts: collectContexts,\n      isInContext: isInContext,\n      isNumericOnlyText: isNumericOnlyText,\n      parseNumberWords: parseNumberWords\n    }\n  };\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "id": "0f692390-5115-463e-a856-d17619319a06",
+      "name": "Extract Order ID"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-order-id",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "order",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "cc01e0b8-9518-493f-ad36-79a1d8d8257e",
+      "name": "Has Order ID?"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "RavtVTN9w9NPZFuZ"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "order_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.orderId }}"
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        -160
+      ],
+      "id": "bcaa6b8f-93e9-4411-b136-b9acf3b33796",
+      "name": "Lookup Order",
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "order-found",
+              "leftValue": "={{ $json.order_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1140,
+        -160
+      ],
+      "id": "3394d904-7616-4a11-92ad-880b7b70371d",
+      "name": "Order Found?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// Runs after the native Data Table lookup. alwaysOutputData guarantees an item\n// even when the order does not exist, so the requested ID is never lost.\nconst source = $('Extract Order ID').first().json;\nconst orderId = String(source.orderId || '');\nconst sessionId = String(source.sessionId || 'anonymous');\nconst confidence = String(source.confidence || 'exact');\n\n// Always Output Data emits a dummy success item even when the lookup fails,\n// so this branch would otherwise race the error branch and could answer\n// \"not found\" for a database error. Suppress it when the error output fired.\ntry {\n  const lookupErrors = $('Lookup Order').all(1);\n  if (lookupErrors.some((item) => item && item.json && item.json.error)) {\n    return [];\n  }\n} catch (error) {\n  // No error branch recorded; continue with normal formatting.\n}\n\nconst rows = $input.all()\n  .map((item) => item.json || {})\n  .filter((row) => row && Object.keys(row).length > 0 &&\n    String(row.order_id == null ? '' : row.order_id) === orderId);\n\nif (rows.length === 0) {\n  // A confident miss and an uncertain interpretation are answered\n  // differently: \"recovered\" means the number was reconstructed from a\n  // compound phrase, so the customer is asked to confirm it.\n  const response = confidence === 'exact'\n    ? `I couldn't find order #${orderId}. Please check the order number.`\n    : `I couldn't find order #${orderId}. Could you confirm the order number?`;\n  return [{ json: { response, sessionId } }];\n}\n\nconst order = rows[0];\nconst status = String(order.status == null ? '' : order.status).trim();\nconst product = String(order.product == null ? '' : order.product).trim();\nlet tracking = String(order.tracking_number == null ? '' : order.tracking_number).trim();\nif (/^(empty|null|none|n\\/a|-)$/i.test(tracking)) tracking = '';\n\nfunction statusPhrase(value) {\n  switch (value.toLowerCase()) {\n    case 'shipped': return 'has shipped';\n    case 'processing': return 'is being processed';\n    case 'delivered': return 'has been delivered';\n    case 'cancelled':\n    case 'canceled': return 'was cancelled';\n    case 'out for delivery': return 'is out for delivery';\n    case 'returned': return 'was returned';\n    default: return value ? `is ${value}` : '';\n  }\n}\n\n// Keep spoken answers short: playback duration dominates total latency.\nconst parts = [];\nconst phrase = statusPhrase(status);\nparts.push(phrase\n  ? `Order ${orderId} ${phrase}.`\n  : `I found order ${orderId}, but its status is currently unavailable.`);\n\nconst details = [];\nif (product) details.push(`It's the ${product}`);\nif (tracking) details.push(`tracking number ${tracking}`);\nif (details.length) {\n  parts.push(`${details.join(', ')}.`);\n}\nif (!tracking) {\n  parts.push(status.toLowerCase() === 'processing'\n    ? 'No tracking number is available yet.'\n    : 'There is no tracking number on file.');\n}\n\nreturn [{ json: { response: parts.join(' '), sessionId } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        -220
+      ],
+      "id": "e86be35a-e735-4abf-a6c1-3c4d7caf893e",
+      "name": "Format Order Result"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "RavtVTN9w9NPZFuZ"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": []
+        },
+        "returnAll": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1360,
+        -60
+      ],
+      "id": "fbaa5749-b77c-4b81-b9f9-9620b4a8ba57",
+      "name": "List Known Orders",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// Runs when the order was not found. A single misheard digit is common\n// (\"1001\" heard as \"1011\"), so offer the closest known order as a question.\n// Nothing is ever returned silently: the customer confirms.\nconst source = $('Extract Order ID').first().json;\nconst orderId = String(source.orderId || '');\nconst sessionId = String(source.sessionId || 'anonymous');\n\n// A lookup error must never be reported as \"not found\".\ntry {\n  const lookupErrors = $('Lookup Order').all(1);\n  if (lookupErrors.some((item) => item && item.json && item.json.error)) {\n    return [];\n  }\n} catch (error) {\n  // No error branch recorded; continue.\n}\n\nfunction distance(a, b) {\n  const rows = a.length + 1;\n  const cols = b.length + 1;\n  let previous = new Array(cols);\n  for (let j = 0; j < cols; j++) previous[j] = j;\n  for (let i = 1; i < rows; i++) {\n    const current = new Array(cols);\n    current[0] = i;\n    for (let j = 1; j < cols; j++) {\n      const cost = a[i - 1] === b[j - 1] ? 0 : 1;\n      current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost);\n    }\n    previous = current;\n  }\n  return previous[cols - 1];\n}\n\nconst known = $input.all()\n  .map((item) => item.json || {})\n  .map((row) => String(row.order_id == null ? '' : row.order_id))\n  .filter((id) => id);\n\nconst close = [];\nfor (const id of known) {\n  if (distance(orderId, id) === 1) close.push(id);\n}\n\nlet response;\nif (close.length === 1) {\n  response = `I couldn't find order #${orderId}. Did you mean order #${close[0]}?`;\n} else {\n  response = `I couldn't find order #${orderId}. Please check the order number.`;\n}\n\nreturn [{ json: { response, sessionId } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        -60
+      ],
+      "id": "c215e6ab-4cc8-4e38-9255-e9a60fbd2227",
+      "name": "Suggest Similar Order"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// Connected to the Data Table node's error output. A database failure must\n// never be reported as \"order not found\".\nconst source = $('Extract Order ID').first().json;\nconst sessionId = String(source.sessionId || 'anonymous');\n\nreturn [{ json: {\n  response: \"I'm having trouble accessing order information right now. Please try again shortly.\",\n  sessionId\n} }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        -320
+      ],
+      "id": "2f256973-5ada-42ed-a1fd-ee1ea0c78dba",
+      "name": "Format Lookup Error"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "needs-clarification",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "general",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        900,
+        160
+      ],
+      "id": "7b981855-9cf9-40b3-8322-5a25bf9f23cf",
+      "name": "Needs Clarification?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// Deterministic response for empty, ambiguous or uncertain input.\n// The parser supplies the wording, so the client and the parser agree.\nconst item = $input.first();\nconst route = String(item.json.route || '');\nconst sessionId = String(item.json.sessionId || 'anonymous');\n\nlet response = item.json.clarification;\nif (!response) {\n  if (route === 'ambiguous') {\n    response = 'Which order number would you like me to check?';\n  } else {\n    response = \"I didn't catch a question. Please tell me your order number or ask a support question.\";\n  }\n}\n\nreturn [{ json: { response, sessionId } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        320
+      ],
+      "id": "47b99aa2-be6f-4952-b48c-5f381255e70e",
+      "name": "Format Clarification"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.chatInput }}",
+        "options": {
+          "systemMessage": "You are the DemoShop support assistant, the customer service agent of DemoShop, an online electronics store.\n\nYour identity:\n- Your name is \"DemoShop Support\". Never use a personal first name, never say you are human, never mention another brand or company.\n- Never describe your feelings, your health or your plans. You are a support agent, not a person.\n- Never use emoji, emoticons or decorative symbols. Write plain spoken sentences only.\n\nHow to answer:\n- Keep every answer to one or two short sentences, at most about 25 words. It is spoken out loud.\n- Greet the customer briefly and then ask what they need, for example: \"Hi, this is DemoShop support. What can I help you with?\"\n- If the customer greets you or asks who you are, greet them and ask for the order number in the same breath.\n- Never invent order statuses, order numbers or tracking numbers. If an order number is missing, ask for it.\n- If the customer asks something unrelated to the store, answer in one short sentence and bring the conversation back to their order.\n- Reply in the same language as the customer.\n\nStore policies:\n- Customers can return products within 14 days of delivery.\n- Standard shipping takes 2-4 business days.\n- Shipping is free for orders over 1000 TRY.\n- Customer support hours are Monday to Friday, 09:00-18:00.\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1140,
+        40
+      ],
+      "id": "3ed7c303-8bc7-464b-a348-66ea0f093a04",
+      "name": "AI Agent",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// The AI Agent exposes its answer as `output`. The voice contract requires\n// `response`, for both branches.\nconst item = $input.first();\nconst data = item.json || {};\nconst source = $('Extract Order ID').first().json;\nconst sessionId = String(source.sessionId || 'anonymous');\nconst chatInput = String(source.chatInput || '');\n\nlet response = data.output;\nif (response === undefined || response === null || response === '') {\n  response = data.response;\n}\nif (response === undefined || response === null || response === '') {\n  response = data.text;\n}\nif (typeof response !== 'string') {\n  response = response == null ? '' : JSON.stringify(response);\n}\n\n// Emoji and symbols cannot be spoken: the phonemiser warns about them and\n// the text to speech engine reads them as noise.\nresponse = response\n  .replace(/[\\u{1F000}-\\u{1FAFF}\\u{2600}-\\u{27BF}\\u{2B00}-\\u{2BFF}\\u{2190}-\\u{21FF}\\u{2900}-\\u{297F}\\u{FE0F}\\u{200D}\\u{20E3}\\u{FE0F}]/gu, ' ')\n  .replace(/[\\u2018\\u2019\\u201C\\u201D]/g, \"'\")\n  .replace(/\\s+/g, ' ')\n  .trim();\n\n// The small model sometimes invents a personal name. A question about the\n// agent's identity always gets the same, correct answer.\nif (/\\b(what'?s your name|what is your name|whats your name|who are you|introduce yourself)\\b/i.test(chatInput)) {\n  response = \"I'm the DemoShop support assistant. What can I help you with?\";\n}\n\nif (!response) {\n  response = \"I'm sorry, I couldn't generate an answer just now. Please try again.\";\n}\n\nreturn [{ json: { response, sessionId } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        40
+      ],
+      "id": "4823b2cb-d82d-4078-b8df-a0194d48b72e",
+      "name": "Normalize AI Response"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n// Connected to the AI Agent's error output (for example, Ollama unavailable).\nconst source = $('Extract Order ID').first().json;\nconst sessionId = String(source.sessionId || 'anonymous');\nreturn [{ json: {\n  response: \"I'm having trouble answering that right now. Please try again shortly.\",\n  sessionId\n} }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        -120
+      ],
+      "id": "5c8ad07e-d17e-46f0-9844-bb5f9bc6b89d",
+      "name": "Format AI Error"
+    },
+    {
+      "parameters": {
+        "model": "qwen3:4b-instruct",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        260
+      ],
+      "id": "3b6d270e-86d7-4355-aafe-24bada5f92fc",
+      "name": "Ollama Chat Model",
+      "credentials": {
+        "ollamaApi": {
+          "id": "VizCi15LZHPUuqzo",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.sessionId }}",
+        "contextWindowLength": 10
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [
+        1220,
+        260
+      ],
+      "id": "2214837a-3918-4c12-8861-c67f349e477d",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { response: $json.response, sessionId: $json.sessionId } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1800,
+        0
+      ],
+      "id": "a53066bc-9e39-461e-a0d2-dfb4d8b7e76a",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "connections": {
+    "Voice Agent Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Order ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Order ID": {
+      "main": [
+        [
+          {
+            "node": "Has Order ID?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Order ID?": {
+      "main": [
+        [
+          {
+            "node": "Lookup Order",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Needs Clarification?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Order": {
+      "main": [
+        [
+          {
+            "node": "Order Found?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Lookup Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Order Found?": {
+      "main": [
+        [
+          {
+            "node": "Format Order Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "List Known Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Order Result": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Known Orders": {
+      "main": [
+        [
+          {
+            "node": "Suggest Similar Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Suggest Similar Order": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Lookup Error": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Clarification?": {
+      "main": [
+        [
+          {
+            "node": "Format Clarification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Clarification": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Normalize AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format AI Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize AI Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format AI Error": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

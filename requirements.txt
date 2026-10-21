@@ -1,0 +1,15 @@
+# Direct dependencies of the voice agent.
+#
+# Install with:  pip install -r requirements.txt
+# (mlx-audio pulls in mlx, torch and miniaudio on Apple silicon.)
+#
+# The Whisper model is NOT part of this file: scripts/setup.sh downloads it,
+# because the model file is 141 MB and does not belong in the repository.
+
+mlx-audio[tts]==0.6.1
+numpy==2.3.5
+requests==2.34.2
+soundfile==0.14.0
+sounddevice==0.5.6
+scipy==1.18.1
+webrtcvad-wheels==2.0.14.post1
