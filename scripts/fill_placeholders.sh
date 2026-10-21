@@ -18,9 +18,10 @@ NAME="${1:-}"
 EMAIL="${2:-}"
 GITHUB_USER="${3:-}"
 REPO_NAME="${4:-}"
+PROTOCOL="${5:-https}"
 
 if [ -z "$NAME" ] || [ -z "$EMAIL" ] || [ -z "$GITHUB_USER" ] || [ -z "$REPO_NAME" ]; then
-  echo "usage: $0 \"<full name>\" \"<email>\" \"<github user>\" \"<repo name>\"" >&2
+  echo "usage: $0 \"<full name>\" \"<email>\" \"<github user>\" \"<repo name>\" [https|ssh]" >&2
   exit 1
 fi
 
@@ -28,7 +29,7 @@ echo "==> Restoring the template"
 git checkout -- LICENSE README.md
 
 echo "==> Filling in the details"
-NAME="$NAME" EMAIL="$EMAIL" GITHUB_USER="$GITHUB_USER" REPO_NAME="$REPO_NAME" \
+NAME="$NAME" EMAIL="$EMAIL" GITHUB_USER="$GITHUB_USER" REPO_NAME="$REPO_NAME" PROTOCOL="$PROTOCOL" \
 python3 - <<'PY'
 import os
 from pathlib import Path
@@ -45,14 +46,15 @@ licence.write_text(text)
 
 readme = Path("README.md")
 text = readme.read_text()
-text = text.replace(
-    "git clone <this repository>",
-    f"git clone git@github.com:{user}/{repo}.git",
-)
+if os.environ.get("PROTOCOL") == "ssh":
+    clone_url = f"git@github.com:{user}/{repo}.git"
+else:
+    clone_url = f"https://github.com/{user}/{repo}.git"
+text = text.replace("git clone <this repository>", f"git clone {clone_url}")
 text = text.replace("cd <repo-name>", f"cd {repo}")
 readme.write_text(text)
 print(f"    LICENSE  copyright holder: {name}")
-print(f"    README   clone url:          git@github.com:{user}/{repo}.git")
+print(f"    README   clone url:          {clone_url}")
 print(f"    README   directory:          {repo}")
 PY
 
