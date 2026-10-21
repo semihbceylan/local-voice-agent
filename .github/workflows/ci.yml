@@ -9,7 +9,7 @@ on:
 jobs:
   offline-suites:
     name: offline test suites
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +28,11 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install ffmpeg
-        run: brew install ffmpeg
+      - name: Install ffmpeg and whisper.cpp
+        # whisper.cpp has a bottle for macOS 15, so no source build is needed.
+        run: |
+          brew install ffmpeg
+          brew install whisper.cpp
 
       - name: Download the Whisper model
         # The model is 141 MB and not part of the repository.

@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -74,7 +75,7 @@ def synthesize(text: str, path: Path, voice: str = "af_heart") -> None:
 
 def transcribe(path: Path, prompt=None) -> tuple[str, float]:
     cmd = [
-        "/opt/homebrew/bin/whisper-cli",
+        os.environ.get("WHISPER_CLI", "/opt/homebrew/bin/whisper-cli"),
         "-m", str(ROOT / "ggml-base.en.bin"),
         "-f", str(path),
         "-otxt", "-nt", "-np", "-l", "en",
@@ -99,6 +100,13 @@ def main():
         print(
             "skipped: the Whisper model is missing. Run ./scripts/setup.sh "
             "or download ggml-base.en.bin."
+        )
+        return 0
+    whisper = os.environ.get("WHISPER_CLI", "/opt/homebrew/bin/whisper-cli")
+    if not os.path.exists(whisper):
+        print(
+            f"skipped: whisper-cli was not found at {whisper}. "
+            "Install whisper.cpp (macOS: brew install whisper.cpp)."
         )
         return 0
     parser = argparse.ArgumentParser()
