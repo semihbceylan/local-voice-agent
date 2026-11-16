@@ -20,6 +20,14 @@ you speak  ->  ffmpeg + WebRTC VAD  ->  whisper.cpp  ->  n8n (Ollama)  ->  Kokor
 
 ## What it does
 
+### Public website demo
+
+The optional [`web/`](web/README.md) app offers a no-login browser voice demo with
+automatic turn-taking, browser speech recognition/synthesis, and a server-only
+OpenRouter free-model connection. It is separate from the fully local client
+below: browser speech may use vendor servers and transcripts go to OpenRouter.
+See its README for Vercel deployment, shared quotas, and browser limitations.
+
 * **Order questions are answered from the database, not from the model.**
   "Where is my order 1001?" is a filtered lookup in the `customer_orders`
   Data Table; the language model never sees it.
