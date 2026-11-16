@@ -1,142 +1,118 @@
-# Turkish Voice Chat & Local Voice Agent
+# Sadece Sohbet — Turkish Voice Chat
 
-Turkish voice chat with OpenRouter and on-device EMA Lightning speech (WebGPU/WASM),
-plus the original fully local macOS customer-service voice agent.
+A Turkish voice chat website with OpenRouter for conversation and EMA Lightning
+running directly on the visitor’s device for speech generation. Start a session,
+allow microphone access, and speak naturally—no account or push-to-talk required.
 
-A fully local voice customer service agent for the macOS. Nothing leaves the
-machine: the microphone, the transcription, the language model and the voice
-are all local.
+**Website:** [just-talk-voice.vercel.app](https://just-talk-voice.vercel.app)
 
-> **Proprietary software, all rights reserved.** This repository is published
-> for viewing only. See [LICENSE](LICENSE).
+> **Proprietary software, all rights reserved.** See [LICENSE](LICENSE).
+> Bundled third-party components retain their own licenses and notices.
 
+## How it works
+
+```text
+Microphone → Turkish browser speech recognition → OpenRouter
+                                                     ↓
+Speakers ← browser-side EMA Lightning ← Turkish reply text
 ```
-you speak  ->  ffmpeg + WebRTC VAD  ->  whisper.cpp  ->  n8n (Ollama)  ->  Kokoro  ->  you hear
-```
 
-| Part | What it is |
+| Component | Implementation |
 |---|---|
-| Capture | one long lived `ffmpeg` stream, resumable WebRTC VAD endpointer |
-| Transcription | `whisper.cpp` with `ggml-base.en` |
-| Routing | n8n workflow: deterministic Data Table lookup for orders, Ollama for everything else |
-| Voice | `mlx-audio` Kokoro, the pipeline is loaded once and reused |
+| Website | Next.js and React, deployed on Vercel |
+| Speech recognition | Browser Speech Recognition API, configured for `tr-TR` |
+| Conversation | Server-side OpenRouter connection to a configurable free model |
+| Speech generation | EMA Lightning ONNX, running in a browser worker |
+| Acceleration | WebGPU where supported; WASM CPU fallback |
+| Production quotas | Shared Redis counters and signed, time-limited sessions |
 
-## What it does
+## Features and limitations
 
-### Public website demo
+- Turkish interface and conversational instructions.
+- Automatic turn-taking after the initial start click.
+- Streaming text replies and chunked audio playback.
+- On-device speech generation without a paid TTS API or Python voice server.
+- Model caching after the initial download.
+- An interrupt button that stops playback and resumes listening.
+- Server-only API keys, bounded requests, and configurable usage limits.
 
-The optional [`web/`](web/README.md) app offers a no-login browser voice demo with
-automatic turn-taking, Turkish browser speech recognition, on-device EMA synthesis, and a server-only
-OpenRouter free-model connection. It is separate from the fully local client
-below: browser speech may use vendor servers and transcripts go to OpenRouter.
-See its README for Vercel deployment, shared quotas, and browser limitations.
+Recognition pauses during replies to avoid echo, so automatic spoken interruption
+is not supported. Browser recognition support varies; desktop Chrome or Edge is
+recommended. EMA uses one fixed Turkish voice. Performance depends on the visitor’s
+device. iPhone and iPad default to WASM.
 
-* **Order questions are answered from the database, not from the model.**
-  "Where is my order 1001?" is a filtered lookup in the `customer_orders`
-  Data Table; the language model never sees it.
-* **Spoken order numbers are understood the way people say them**:
-  `1,001`, `one thousand and one` and even `1,000 and 1` all resolve to 1001.
-* **Uncertain input is never guessed.** Two possible order numbers, or a
-  number that cannot be interpreted safely, produce a question instead of a
-  lookup. A single misheard digit produces
-  *"I couldn't find order #1011. Did you mean order #1001?"*
-* **Call mode:** the microphone stays open, the agent answers by itself and
-  hangs up when you say goodbye.
+## Run locally
 
-## Quick start
+Use Node.js 22 LTS or later:
 
-```bash
+```sh
 git clone https://github.com/semihbceylan/local-voice-agent.git
 cd local-voice-agent
-./scripts/setup.sh          # virtualenv, dependencies, Whisper model
-cp .env.example .env        # add your n8n API key
-.venv/bin/python voice_agent.py
+git switch public-voice-demo
+cd web
+npm ci
+cp .env.example .env.local
 ```
 
-The client talks to n8n, so the workflow has to be deployed first:
+Set these values in `web/.env.local`:
 
-```bash
-export N8N_API_KEY=...      # never put the key in a file
-./scripts/deploy_workflow.sh
+```dotenv
+OPENROUTER_API_KEY=your-key
+OPENROUTER_MODEL=your-selected-model-id:free
+SESSION_SECRET=your-random-secret
 ```
 
-See [docs/n8n-setup.md](docs/n8n-setup.md) for the Data Table, the Ollama
-credential and the webhook.
+Generate a session secret with `openssl rand -hex 32`. Never commit credentials
+or prefix them with `NEXT_PUBLIC_`.
 
-## Using the client
-
-```bash
-.venv/bin/python voice_agent.py                    # call mode: always listening
-.venv/bin/python voice_agent.py --mode arm         # press Enter to talk
-.venv/bin/python voice_agent.py --mode ptt         # fixed length recording
-.venv/bin/python voice_agent.py --barge-in         # interrupt the answer
-.venv/bin/python voice_agent.py --no-play          # print only, no voice
-.venv/bin/python voice_agent.py --list-output-devices
-.venv/bin/python voice_agent.py --output-device "Mac mini Hoparlörü"
+```sh
+npm run dev
 ```
 
-## Repository layout
+Open **http://localhost:3000**. On first start, the browser downloads approximately
+36 MB of model files plus runtime files. Local development uses in-memory quotas
+and does not require Redis. Optional local overrides in
+`web/demo-limits.local.json` are ignored by Git and never used in production.
 
-```
-README.md  LICENSE  requirements.txt  .env.example  .github/
-voice_agent.py             client: capture, transcription, playback, call loop
-vad_stream.py              resumable voice activity detection
-farewell.py                goodbye detection
-build_voice_workflow.py    generates the n8n workflow
-workflow/
-  extract_order_id.js      the order parser (embedded into the workflow)
-workflows/
-  voice_agent_production.json   the generated n8n workflow
-scripts/
-  setup.sh                 environment, dependencies, Whisper model
-  deploy_workflow.sh       build and deploy the workflow to n8n
-  test_all.sh              every test suite
-tests/                     unit, integration and live microphone tests
-docs/                      architecture, n8n setup, troubleshooting
-```
+## Deploy to Vercel
 
-## Tests
+Use the `public-voice-demo` branch, the Next.js preset, and **Root Directory: `web`**.
+Configure the server-only environment variables from
+[`web/.env.example`](web/.env.example), including the shared Redis REST credentials
+required for production quotas, then deploy.
 
-```bash
-./scripts/test_all.sh
-```
+EMA runs on visitors’ devices on Vercel too; no separately hosted speech service
+is required. Free OpenRouter models and hosting tiers have quotas and availability
+limits. No paid LLM fallback is configured.
 
-| Suite | What it covers |
-|---|---|
-| `tests/parser/` | the order parser, run with `node --test` against the file that is embedded into the workflow |
-| `tests/test_workflow_build.py` | guard: the committed workflow has to match the builder and must not contain a secret |
-| `tests/fixtures_gen.py` | generates the speech fixture locally with Kokoro, so no microphone recording is published |
-| `tests/test_vad.py` | the endpointer: threshold, noise floor, pauses, start clipping, breakdown |
-| `tests/test_call_mode.py` | the continuous call loop, turn after turn, hanging up on a goodbye |
-| `tests/test_farewell.py` | goodbye detection and the phrases that must not trigger it |
-| `tests/stt_reliability.py` | synthesised speech -> whisper.cpp -> parser |
-| `tests/test_integration.py` | end to end over HTTP against freshly created isolated n8n workflows |
-| `tests/live_mic_test.py` | the physical microphone test, prints the timing of every stage |
-| `tests/record_sample.py`, `tests/analyse_sample.py` | record a raw microphone sample and analyse it |
-
-A suite that needs something that is not there skips itself instead of
-failing: the microphone test needs a microphone, the speech fixture needs
-Kokoro and the recognition test needs the Whisper model
-(`./scripts/setup.sh` downloads it). No recording of a real microphone is
-part of this repository; the speech fixture is generated locally with Kokoro.
-
-## Configuration
-
-Everything is configured through the environment or command line flags, for
-example `VAD_SILENCE_MS`, `VAD_MAX_SECONDS`, `AUDIO_DEVICE`,
-`WHISPER_MODEL`, `KOKORO_VOICE`, `OUTPUT_DEVICE`, `N8N_WEBHOOK_URL`. The full
-list is in [docs/architecture.md](docs/architecture.md) and in the client
-itself (`voice_agent.py --help`).
-
-## Documentation
-
-* [docs/architecture.md](docs/architecture.md) - routing, parser, endpointer, latency
-* [docs/n8n-setup.md](docs/n8n-setup.md) - n8n, Data Table, credential, deployment
-* [docs/troubleshooting.md](docs/troubleshooting.md) - the known failure modes and their fixes
+See [`web/README.md`](web/README.md) for deployment details and usage limits.
 
 ## Privacy
 
-Nothing is sent to a cloud service. The only outbound connection is to your
-own n8n instance on localhost. The repository contains no API key, no
-microphone recording and no personal data: `.env`, `*.wav`, `logs/` and
-`backups/` are ignored by git.
+- Conversation text is sent through the server to OpenRouter and its model provider.
+- Speech recognition may send microphone audio to the browser vendor’s service.
+- EMA synthesizes replies locally in the visitor’s browser.
+- Model files download from Hugging Face; the inference runtime loads from jsDelivr.
+- The website does not persist conversation transcripts. Providers have their own
+  retention policies; avoid sharing sensitive information.
+
+## Development
+
+```sh
+cd web
+npm test
+npm run build
+```
+
+The repository also retains an earlier Python/macOS voice client and its tests.
+Those files are independent of the website and are not required to run or deploy it.
+
+## Credits
+
+- [EMA Lightning](https://huggingface.co/canberkkkkkk/ema-lightning) by Canberk Aslan.
+- [Browser engine](https://github.com/ozcancelik/ema-lightning-web) and
+  [ONNX conversion](https://huggingface.co/ozcancelik/ema-lightning-onnx) by ozcancelik.
+- ONNX Runtime Web and normalizer-tr.
+
+Pinned versions and third-party license notices are documented in
+[`web/README.md`](web/README.md) and [`web/public/ema/NOTICE`](web/public/ema/NOTICE).
