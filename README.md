@@ -1,4 +1,7 @@
-# DemoShop Local Voice Agent
+# Turkish Voice Chat & Local Voice Agent
+
+Turkish voice chat with OpenRouter and on-device EMA Lightning speech (WebGPU/WASM),
+plus the original fully local macOS customer-service voice agent.
 
 A fully local voice customer service agent for the macOS. Nothing leaves the
 machine: the microphone, the transcription, the language model and the voice
@@ -23,7 +26,7 @@ you speak  ->  ffmpeg + WebRTC VAD  ->  whisper.cpp  ->  n8n (Ollama)  ->  Kokor
 ### Public website demo
 
 The optional [`web/`](web/README.md) app offers a no-login browser voice demo with
-automatic turn-taking, browser speech recognition/synthesis, and a server-only
+automatic turn-taking, Turkish browser speech recognition, on-device EMA synthesis, and a server-only
 OpenRouter free-model connection. It is separate from the fully local client
 below: browser speech may use vendor servers and transcripts go to OpenRouter.
 See its README for Vercel deployment, shared quotas, and browser limitations.

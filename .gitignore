@@ -5,6 +5,7 @@
 node_modules/
 .next/
 .vercel/
+web/demo-limits.local.json
 
 # Local environments and caches
 .venv/

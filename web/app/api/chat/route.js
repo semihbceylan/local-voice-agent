@@ -1,16 +1,18 @@
 import { consume, sameOrigin, validateMessages, verifySession } from '../../../lib/security.mjs';
+import { demoLimits } from '../../../lib/limits.mjs';
+import { turkishPrompt } from '../../../lib/voice-config.mjs';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 export async function POST(request) {
-  if (!sameOrigin(request)) return Response.json({ error: 'Request not allowed.' }, { status: 403 });
+  if (!sameOrigin(request)) return Response.json({ error: 'İstek reddedildi.' }, { status: 403 });
   const secret = process.env.SESSION_SECRET;
   const session = secret && verifySession(request.headers.get('authorization')?.replace(/^Bearer /, ''), secret);
-  if (!session) return Response.json({ error: 'Your demo session has ended.' }, { status: 401 });
+  if (!session) return Response.json({ error: 'Sohbet oturumunuz sona erdi.' }, { status: 401 });
   const model = process.env.OPENROUTER_MODEL;
   if (!model?.endsWith(':free') || !process.env.OPENROUTER_API_KEY) {
-    return Response.json({ error: 'A free model has not been configured.' }, { status: 503 });
+    return Response.json({ error: 'Ücretsiz model ayarı yapılmamış.' }, { status: 503 });
   }
   let messages;
   try {
@@ -22,34 +24,36 @@ export async function POST(request) {
       const { value, done } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 20_000) { await reader.cancel(); return Response.json({ error: 'Message too large.' }, { status: 413 }); }
+      if (size > 20_000) { await reader.cancel(); return Response.json({ error: 'Mesaj çok uzun.' }, { status: 413 }); }
       chunks.push(Buffer.from(value));
     }
     ({ messages } = JSON.parse(Buffer.concat(chunks).toString()));
     if (!validateMessages(messages)) throw new Error();
-  } catch { return Response.json({ error: 'Invalid conversation.' }, { status: 400 }); }
+  } catch { return Response.json({ error: 'Geçersiz sohbet verisi.' }, { status: 400 }); }
   try {
-    const daily = Math.min(1000, Math.max(1, Number(process.env.DEMO_DAILY_REQUEST_LIMIT) || 100));
-    if (!await consume(`turns:${session.id}`, 12, 180) ||
-        !await consume(`day:${new Date().toISOString().slice(0, 10)}`, daily, 86400)) {
-      return Response.json({ error: 'The demo allowance has been reached. Please try again later.' }, { status: 429 });
+    const limits = await demoLimits();
+    if (!await consume(`turns:${session.id}`, limits.turnsPerSession, 180) ||
+        !await consume(`day:${new Date().toISOString().slice(0, 10)}`, limits.requestsPerDay, 86400)) {
+      return Response.json({ error: 'Sohbet sınırına ulaşıldı. Lütfen daha sonra deneyin.' }, { status: 429 });
     }
     const upstream = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model, stream: true, max_tokens: 180,
-        messages: [{ role: 'system', content: 'You are a friendly AI voice chat companion. Have a natural, open-ended conversation about whatever the user wants: everyday life, ideas, hobbies, learning, or creative brainstorming. Reply in one to three short spoken sentences without markdown, and ask a relevant follow-up when it feels natural. Be warm, curious, and honest, not promotional or scripted. You are an AI, not a person. You have no tools, live web access, or access to private data; do not pretend otherwise. Do not request sensitive personal or payment information.' }, ...messages],
+        model, stream: true, max_tokens: 512,
+        // Reasoning tokens share the output budget. Prefer direct answers for voice.
+        reasoning: { enabled: false },
+        messages: [{ role: 'system', content: turkishPrompt }, ...messages],
       }),
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(45_000)]),
     });
     if (!upstream.ok || !upstream.body) {
-      return Response.json({ error: 'The free model is busy or unavailable. Please try again shortly.' }, { status: 503 });
+      return Response.json({ error: 'Ücretsiz model şu anda meşgul. Lütfen biraz sonra tekrar deneyin.' }, { status: 503 });
     }
     return new Response(upstream.body, { headers: {
       'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no',
     } });
   } catch {
-    return Response.json({ error: 'The voice service is temporarily unavailable.' }, { status: 503 });
+    return Response.json({ error: 'Sohbet servisi geçici olarak kullanılamıyor.' }, { status: 503 });
   }
 }
