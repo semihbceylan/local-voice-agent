@@ -215,11 +215,11 @@ export default function Home() {
   }
 
   return <main>
-    <nav><a className="brand" href="/">demo<span>shop</span><span className="brand-dot">●</span></a><span className="nav-label">VOICE LAB / 001</span><span className="badge"><i /> PUBLIC DEMO</span></nav>
+    <nav><a className="brand" href="/">just<span>talk</span><span className="brand-dot">●</span></a><span className="nav-label">VOICE LAB / 001</span><span className="badge"><i /> PUBLIC DEMO</span></nav>
     <section className="hero">
-      <div className="intro"><p className="eyebrow">LESS TYPING. MORE HUMAN.</p><h1>A conversation.<br />Not a <em>chatbox.</em></h1><p className="description">Meet your browser’s new voice concierge. Say hello, ask a question, and let the conversation flow.</p><div className="details"><span>No account needed</span><span>2-minute experience</span></div></div>
+      <div className="intro"><p className="eyebrow">LESS TYPING. MORE HUMAN.</p><h1>A conversation.<br />Not a <em>chatbox.</em></h1><p className="description">A little curiosity goes a long way. Talk about your day, explore an idea, or ask whatever’s on your mind.</p><div className="details"><span>No account needed</span><span>2-minute experience</span></div></div>
       <div className={`voice-card ${active ? 'is-active' : ''}`}>
-        <div className="card-top"><span>DEMOSHOP CONCIERGE</span><span className="timer">{active ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}` : '02:00'}</span></div>
+        <div className="card-top"><span>YOUR AI CHAT COMPANION</span><span className="timer">{active ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}` : '02:00'}</span></div>
         <div className={`orb-wrap ${active ? 'moving' : ''}`} aria-hidden="true"><div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="orb"><div className="wave">{Array.from({ length: 9 }, (_, i) => <span key={i} style={{ '--i': i }} />)}</div></div></div>
         <div className="voice-status" role="status"><span className={active ? 'live-dot' : 'quiet-dot'} />{status}</div>
         <p className="card-hint">{active ? status === 'Speaking' ? 'Listen to the reply, or tap interrupt below.' : 'Speak naturally. We’ll take it from here.' : 'One click to connect. Then just talk.'}</p>
@@ -231,9 +231,9 @@ export default function Home() {
       </div>
     </section>
     <section className="bottom-grid">
-      <div className="prompts"><p className="eyebrow">A LITTLE INSPIRATION</p><h2>Start anywhere.</h2><p>“What can you help me with?”</p><p>“Help me choose a gift.”</p><p>“How does this voice demo work?”</p></div>
-      <div className="transcript"><div className="transcript-heading"><p className="eyebrow">THE CONVERSATION</p><span>LIVE TRANSCRIPT</span></div><div className="transcript-body" ref={transcript} role="log" aria-label="Conversation transcript">{messages.length === 0 && !interim ? <p className="empty">Your words, and ours, will appear here.<br /><span>Nothing to type. Nothing to sign up for.</span></p> : <>{messages.map((m, i) => <div className={`message ${m.role}`} key={i}><span>{m.role === 'user' ? 'YOU' : 'CONCIERGE'}</span><p>{m.content}</p></div>)}{interim && <div className="message partial"><span>YOU</span><p>{interim}…</p></div>}</>}</div></div>
+      <div className="prompts"><p className="eyebrow">A LITTLE INSPIRATION</p><h2>Start anywhere.</h2><p>“Tell me something surprising.”</p><p>“Let’s brainstorm a weekend adventure.”</p><p>“I have an idea I want to talk through.”</p></div>
+      <div className="transcript"><div className="transcript-heading"><p className="eyebrow">THE CONVERSATION</p><span>LIVE TRANSCRIPT</span></div><div className="transcript-body" ref={transcript} role="log" aria-label="Conversation transcript">{messages.length === 0 && !interim ? <p className="empty">Your words, and ours, will appear here.<br /><span>Nothing to type. Nothing to sign up for.</span></p> : <>{messages.map((m, i) => <div className={`message ${m.role}`} key={i}><span>{m.role === 'user' ? 'YOU' : 'AI'}</span><p>{m.content}</p></div>)}{interim && <div className="message partial"><span>YOU</span><p>{interim}…</p></div>}</>}</div></div>
     </section>
-    <footer><p>An experiment in more natural interfaces.</p><p>Speech may be processed by your browser’s provider. Text goes to OpenRouter.<br />No audio is sent to our server. Avoid sharing personal information.</p><p>Demo only · No access to real orders.<br />Free-model availability and browser support vary.</p></footer>
+    <footer><p>An experiment in more natural interfaces.</p><p>Speech may be processed by your browser’s provider. Text goes to OpenRouter.<br />No audio is sent to our server. Avoid sharing personal information.</p><p>You’re chatting with AI. It can make mistakes.<br />Free-model availability and browser support vary.</p></footer>
   </main>;
 }

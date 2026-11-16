@@ -1,7 +1,7 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'DemoShop — Voice concierge',
+  title: 'Just Talk — Voice chat',
   description: 'A hands-free browser voice demo. No account needed.',
 };
 

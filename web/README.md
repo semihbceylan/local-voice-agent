@@ -1,6 +1,6 @@
 # Public browser voice demo
 
-Next.js frontend + server-only OpenRouter streaming endpoint. No paid speech APIs, audio transport service, local Python model, or login is required. This is separate from the existing local CLI and does not connect to its n8n orders database.
+General-purpose AI voice chat with a Next.js frontend + server-only OpenRouter streaming endpoint. No paid speech APIs, audio transport service, local Python model, or login is required. This is independent of the existing local CLI and its business workflows.
 
 ## Local development
 
@@ -18,7 +18,7 @@ Pick an available OpenRouter text model whose ID ends with `:free`. No paid fall
 
 ## Vercel
 
-1. Import this repository, select branch `feat/public-voice-demo`, and set **Root Directory** to `web` (Next.js preset).
+1. Import this repository, select branch `public-voice-demo`, and set **Root Directory** to `web` (Next.js preset).
 2. Set the variables from `.env.example` in Vercel project settings. `SESSION_SECRET` should be a random 32-byte secret (`openssl rand -hex 32`).
 3. Create a free Upstash Redis database and set its REST URL/token. Production fails closed without shared quotas; process memory is used only for local development. Do not enable paid upgrades.
 4. Deploy. For previews, configure the same environment variables for the Preview environment. A feature branch creates a preview deployment; set it as the production branch only if that is intended.
@@ -32,7 +32,7 @@ Pick an available OpenRouter text model whose ID ends with `:free`. No paid fall
 - Audio is not uploaded to this app. Transcripts go to OpenRouter; review its/model-provider policies before sending sensitive information. The app does not persist transcripts, but providers have their own logging policies.
 - Server-enforced: three starts per IP/hour, signed two-minute sessions, 12 turns/session, configurable global daily requests (100 default, 1000 hard maximum), bounded inputs and outputs. IP quotas are not identity or strong bot protection; origin checks do not stop scripted clients.
 - There is no guaranteed global concurrency limit. Global request quotas and provider limits constrain exposure. Request cancellation is best effort and does not guarantee upstream quota recovery.
-- No real order lookup, account tools, purchases, or real shop policies. The agent must disclose its limitations.
+- General conversation only; no tools, live web access, or access to private data. The agent must disclose its limitations.
 
 ```sh
 npm test
