@@ -48,7 +48,6 @@ Use Node.js 22 LTS or later:
 ```sh
 git clone https://github.com/semihbceylan/local-voice-agent.git
 cd local-voice-agent
-git switch public-voice-demo
 cd web
 npm ci
 cp .env.example .env.local
