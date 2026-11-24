@@ -47,7 +47,7 @@ jobs:
         run: python tests/fixtures_gen.py
 
       - name: Order parser
-        run: node --test tests/parser/
+        run: node --test tests/parser/*.test.js
 
       - name: Voice activity detection
         run: python tests/test_vad.py
@@ -58,8 +58,36 @@ jobs:
       - name: Farewell detection
         run: python tests/test_farewell.py
 
+      - name: Terminal UI and startup checks
+        run: python tests/test_ui.py
+
       - name: Workflow build guard
         run: python tests/test_workflow_build.py
 
       - name: Speech recognition reliability
         run: python tests/stt_reliability.py
+
+  website:
+    name: website (web/)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build

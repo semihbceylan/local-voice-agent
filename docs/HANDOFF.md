@@ -3,12 +3,17 @@
 Status of the repository and the facts that are expensive to rediscover.
 Read this before changing anything.
 
+> Scope: this document covers the **local Python client** (see
+> [local-client.md](local-client.md)). Since 24 Nov 2026 `main` also holds the
+> Turkish voice chat website in `web/` (see [web/README.md](../web/README.md)),
+> which shares no code with the client and does not use n8n.
+
 ## Where we are
 
 | | |
 |---|---|
 | Repository | `https://github.com/semihbceylan/local-voice-agent` (public, proprietary licence) |
-| Local folder | `~/local-voice-agent` (git repo, branch `main`) |
+| Local folder | `~/voice-agents/local-voice-agent` (git repo, branch `main`) |
 | n8n workflow | `nPLoCe6uuit1oMqs` "DemoShop Voice Agent API", webhook `POST /webhook/voice-agent` |
 | Data | n8n Data Table `customer_orders` (id `RavtVTN9w9NPZFuZ`), three fictional orders |
 | Language model | Ollama `qwen3:4b-instruct` (host `http://host.docker.internal:11434` from the container) |
@@ -29,6 +34,7 @@ microphone -> ffmpeg (one long lived process) -> 30 ms frames
 | File | Role |
 |---|---|
 | `voice_agent.py` | client: capture, transcription, TTS, call mode, latency log |
+| `ui.py` | terminal presentation: conversation view, live status line, startup checklist |
 | `vad_stream.py` | the endpointer as a resumable state machine |
 | `farewell.py` | goodbye detection (ends the call) |
 | `build_voice_workflow.py` | **generates** the n8n workflow, it is the source of truth |
@@ -70,6 +76,11 @@ microphone -> ffmpeg (one long lived process) -> 30 ms frames
   text into audio and every test that generates speech fails.
 * Emoji cannot be spoken. The workflow strips them before the answer
   reaches Kokoro, otherwise the phonemiser warns and reads them as noise.
+
+**Node**
+* From Node 22 on, `node --test tests/parser/` treats the directory as a
+  module and fails with `MODULE_NOT_FOUND`. Pass the files instead:
+  `node --test tests/parser/*.test.js` (works on Node 20 as well).
 
 **The repository**
 * The workflow JSON is a **build artifact**. `build_voice_workflow.py` is

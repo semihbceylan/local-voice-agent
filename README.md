@@ -104,8 +104,20 @@ npm test
 npm run build
 ```
 
-The repository also retains an earlier Python/macOS voice client and its tests.
-Those files are independent of the website and are not required to run or deploy it.
+## The local Python client
+
+The repository also contains a separate, fully local macOS voice agent for
+customer support (English): whisper.cpp, Ollama and Kokoro, with order
+lookups answered from a table instead of the language model. It shares no
+code with the website and is not needed to run or deploy it.
+
+```sh
+./scripts/setup.sh
+.venv/bin/python voice_agent.py --check   # what is missing and how to fix it
+.venv/bin/python voice_agent.py           # call mode
+```
+
+See [docs/local-client.md](docs/local-client.md).
 
 ## Credits
 

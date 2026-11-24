@@ -31,10 +31,11 @@ run() {
   fi
 }
 
-run "order parser (node --test)"        node --test tests/parser/
+run "order parser (node --test)"        node --test tests/parser/*.test.js
 run "voice activity detection"          "$PY" tests/test_vad.py
 run "call mode"                         "$PY" tests/test_call_mode.py
 run "farewell detection"                "$PY" tests/test_farewell.py
+run "terminal ui and startup checks"    "$PY" tests/test_ui.py
 run "workflow build guard"              "$PY" tests/test_workflow_build.py
 run "speech recognition reliability"    "$PY" tests/stt_reliability.py
 
