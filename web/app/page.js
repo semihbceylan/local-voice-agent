@@ -4,24 +4,60 @@ import { useEffect, useRef, useState } from 'react';
 import { readChatEvents } from '../lib/stream.mjs';
 import { loadBrowserEMA } from '../lib/browser-ema.mjs';
 
+const READY = 'Hazır olduğunda buradayım';
+
+// What the person sees under the orb in each phase of the conversation.
+const HINTS = {
+  idle: 'Bir kez başlat. Sonra sadece konuş.',
+  loading: 'Ses modeli cihazına indiriliyor. Sonraki ziyarette hazır olacak.',
+  connecting: 'Oturum açılıyor…',
+  listening: 'Doğal konuş. Sustuğunda sıra bende.',
+  thinking: 'Yanıt hazırlanıyor. İstersen sözü alabilirsin.',
+  preparing: 'Ses hazırlanıyor. İstersen sözü alabilirsin.',
+  speaking: 'Yanıtı dinle ya da sözü al.',
+};
+
+const PROMPTS = [
+  'Bana şaşırtıcı bir şey anlat.',
+  'Hafta sonu için birlikte plan yapalım.',
+  'Aklımda bir fikir var, konuşalım mı?',
+];
+
+function clock(seconds) {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
 export default function Home() {
   const [supported, setSupported] = useState(null);
   const [active, setActive] = useState(false);
-  const [status, setStatus] = useState('Hazır olduğunda buradayım');
+  // idle | loading | connecting | listening | thinking | preparing | speaking
+  const [phase, setPhase] = useState('idle');
+  const [status, setStatus] = useState(READY);
+  const [progress, setProgress] = useState(0);
   const [messages, setMessages] = useState([]);
   const [interim, setInterim] = useState('');
   const [error, setError] = useState('');
+  const [duration, setDuration] = useState(120);
   const [remaining, setRemaining] = useState(120);
+  const [backend, setBackend] = useState('');
   const live = useRef({ active: false, history: [], generation: 0, speaking: false });
   const transcript = useRef(null);
 
+  function go(nextPhase, label) {
+    setPhase(nextPhase);
+    setStatus(label);
+  }
+
   useEffect(() => {
     setSupported(Boolean((window.SpeechRecognition || window.webkitSpeechRecognition) && window.AudioContext && window.Worker));
-    return () => stop();
+    // Only release resources on unmount; never touch the visible state here
+    // (React runs this cleanup once in development, which used to show
+    // "Sohbet sona erdi" before any conversation had started).
+    return () => teardown();
   }, []);
   useEffect(() => { transcript.current?.scrollTo({ top: transcript.current.scrollHeight, behavior: 'smooth' }); }, [messages, interim]);
 
-  function stop(label = 'Sohbet sona erdi') {
+  function teardown() {
     const s = live.current;
     s.active = false;
     s.generation++;
@@ -36,9 +72,13 @@ export default function Home() {
     window.speechSynthesis?.cancel();
     s.speaking = false;
     s.pending = 0;
+  }
+
+  function stop(label = 'Sohbet sona erdi') {
+    teardown();
     setActive(false);
     setInterim('');
-    setStatus(label);
+    go('idle', label);
   }
 
   function resetIdle() {
@@ -65,9 +105,9 @@ export default function Home() {
       s.audioQueue = (s.audioQueue || Promise.resolve()).then(async () => {
         if (!s.active || generation !== s.generation) return;
         try {
-          setStatus('Ses hazırlanıyor');
+          go('preparing', 'Ses hazırlanıyor');
           await s.ema.speak(text, () => {
-            if (s.active && generation === s.generation) setStatus('Konuşuyor');
+            if (s.active && generation === s.generation) go('speaking', 'Konuşuyor');
           });
         } catch (error) {
           if (error.name !== 'AbortError' && s.active && generation === s.generation) setError(error.message);
@@ -80,7 +120,7 @@ export default function Home() {
       });
       return;
     }
-    setStatus('Konuşuyor');
+    go('speaking', 'Konuşuyor');
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'tr-TR';
     utterance.rate = 1.03;
@@ -100,7 +140,7 @@ export default function Home() {
     const s = live.current;
     if (!s.active) return;
     s.speaking = false;
-    setStatus('Dinliyor');
+    go('listening', 'Dinliyor');
     resetIdle();
     clearTimeout(s.restart);
     s.restart = setTimeout(listen, 350);
@@ -115,7 +155,7 @@ export default function Home() {
     s.history = [...s.history, { role: 'user', content: text }].slice(-19);
     setMessages([...s.history]);
     setInterim('');
-    setStatus('Düşünüyor');
+    go('thinking', 'Düşünüyor');
     const generation = ++s.generation;
     s.controller = new AbortController();
     let answer = '';
@@ -158,15 +198,17 @@ export default function Home() {
 
   async function start() {
     setError('');
-    setStatus('Bağlanıyor');
+    setProgress(0);
     const s = live.current;
     try {
-      setStatus('EMA yükleniyor');
+      go('loading', 'Ses motoru yükleniyor');
       s.ema = await loadBrowserEMA(({ stage, fraction }) => {
         const stages = { normalizer: 'Türkçe metin işleyici', text: 'Metin modeli', sound: 'Ses modeli', decoder: 'Ses çözücü', fallback: 'CPU moduna geçiliyor' };
-        setStatus(`${stages[stage] || 'EMA yükleniyor'} · %${Math.round(fraction * 100)}`);
+        setProgress(fraction || 0);
+        go('loading', stages[stage] || 'Ses motoru yükleniyor');
       });
-      setStatus('Bağlanıyor');
+      setBackend(s.ema?.backend === 'webgpu' ? 'WebGPU' : 'WASM / CPU');
+      go('connecting', 'Bağlanıyor');
       const response = await fetch('/api/session', { method: 'POST' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error);
@@ -204,9 +246,10 @@ export default function Home() {
         }
       };
       setMessages([]);
+      setDuration(data.duration);
       setRemaining(data.duration);
       setActive(true);
-      setStatus('Dinliyor');
+      go('listening', 'Dinliyor');
       s.expires = Date.now() + data.duration * 1000;
       s.clock = setInterval(() => {
         const left = Math.max(0, Math.ceil((s.expires - Date.now()) / 1000));
@@ -216,7 +259,7 @@ export default function Home() {
       resetIdle();
       recognition.start();
     } catch (e) {
-      stop('Hazır olduğunda buradayım');
+      stop(READY);
       setError(e.message || 'Sohbet başlatılamadı.');
     }
   }
@@ -235,27 +278,114 @@ export default function Home() {
     resumeListening();
   }
 
+  const busy = phase === 'loading' || phase === 'connecting';
+  const interruptible = ['thinking', 'preparing', 'speaking'].includes(phase);
+  const last = messages[messages.length - 1];
+  const streaming = phase === 'thinking' && last?.role === 'assistant';
+  const timeShare = active ? remaining / Math.max(1, duration) : 1;
+
   return <main>
-    <nav><a className="brand" href="/">sadece<span>sohbet</span><span className="brand-dot">●</span></a><span className="nav-label">SES LAB / 001</span><span className="badge"><i /> HERKESE AÇIK DEMO</span></nav>
-    <section className="hero">
-      <div className="intro"><p className="eyebrow">YAZMA. İÇİNDEN GELDİĞİ GİBİ KONUŞ.</p><h1>Bir mesaj kutusu<br />değil, <em>sohbet.</em></h1><p className="description">Gününü anlat, bir fikri birlikte keşfedelim ya da aklına takılanı sor. Türkçe konuş, sohbet kendiliğinden aksın.</p><div className="details"><span>Hesap gerekmez</span><span>2 dakikalık deneyim</span></div></div>
-      <div className={`voice-card ${active ? 'is-active' : ''}`}>
-        <div className="card-top"><span>YAPAY ZEKÂ SOHBET ARKADAŞIN</span><span className="timer">{active ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}` : '02:00'}</span></div>
-        <div className={`orb-wrap ${active ? 'moving' : ''}`} aria-hidden="true"><div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="orb"><div className="wave">{Array.from({ length: 9 }, (_, i) => <span key={i} style={{ '--i': i }} />)}</div></div></div>
-        <div className="voice-status" role="status"><span className={active ? 'live-dot' : 'quiet-dot'} />{status}</div>
-        <p className="card-hint">{active ? status === 'Konuşuyor' ? 'Yanıtı dinle ya da aşağıdan sözü al.' : 'Doğal konuş. Gerisini bize bırak.' : 'Bir kez başlat. Sonra sadece konuş.'}</p>
-        <button className={`primary ${active ? 'end' : ''}`} disabled={supported === null || supported === false || (!active && status !== 'Hazır olduğunda buradayım' && status !== 'Sohbet sona erdi' && status !== 'Deneme süresi sona erdi' && status !== 'Sessizlik nedeniyle duraklatıldı')} onClick={() => active ? stop() : start()}>{active ? 'Sohbeti bitir' : status === 'Bağlanıyor' || status.includes('yükleniyor') || status.includes(' · %') ? 'Ses motoru hazırlanıyor…' : 'Sohbeti başlat'}<span aria-hidden="true">↗</span></button>
-        {active && <button className="interrupt" onClick={interrupt} disabled={!['Konuşuyor', 'Düşünüyor', 'Ses hazırlanıyor'].includes(status)}>Sözü al ve dinlemeye geç</button>}
-        {supported === false && <p className="notice">Bu tarayıcı konuşma tanımayı desteklemiyor. Masaüstü Chrome veya Edge deneyin.</p>}
-        {error && <p className="notice" role="alert">{error}</p>}
-        <div className="card-footer"><span className="small-dot" /> EMA · {live.current.ema?.backend === 'webgpu' ? 'WEBGPU' : live.current.ema ? 'WASM / CPU' : 'CİHAZINDA ÇALIŞIR'} <span>TÜRKÇE / TR-TR</span></div>
-        {!active && <p className="card-hint">İlk kullanımda yaklaşık 36 MB model ve ek çalışma dosyaları indirilir; sonraki ziyaretler için önbelleğe alınır.</p>}
+    <nav>
+      <a className="brand" href="/">sadece<b>sohbet</b><span className="brand-dot" aria-hidden="true" /></a>
+      <span className="badge"><i aria-hidden="true" /> Herkese açık demo</span>
+    </nav>
+
+    <section className="layout">
+      <div className="intro">
+        <p className="eyebrow">Yazma. İçinden geldiği gibi konuş.</p>
+        <h1>Bir mesaj kutusu değil, <em>sohbet.</em></h1>
+        <p className="description">Gününü anlat, bir fikri birlikte keşfedelim ya da aklına takılanı sor. Türkçe konuş, sohbet kendiliğinden aksın.</p>
+        <ul className="details">
+          <li>Hesap gerekmez</li>
+          <li>{Math.round(duration / 60)} dakikalık deneyim</li>
+          <li>Ses cihazında üretilir</li>
+        </ul>
+      </div>
+
+      <div className={`call ${active ? 'is-active' : ''}`}>
+        <div className="call-top">
+          <span className="call-title">Yapay zekâ sohbet arkadaşın</span>
+          <span className={`timer ${active && remaining <= 20 ? 'low' : ''}`} aria-label="Kalan süre">{clock(active ? remaining : duration)}</span>
+          <span className="time-bar" aria-hidden="true"><span style={{ transform: `scaleX(${timeShare})` }} /></span>
+        </div>
+
+        <div className="stage-area">
+          <div className={`stage phase-${phase}`} style={{ '--progress': progress }} aria-hidden="true">
+            <div className="ripple" /><div className="ripple late" />
+            <div className="ring" />
+            <div className="orb">
+              <div className="bars">{Array.from({ length: 7 }, (_, i) => <span key={i} style={{ '--i': i }} />)}</div>
+              <div className="dots"><i /><i /><i /></div>
+            </div>
+          </div>
+          <div className="status" role="status" aria-live="polite">
+            <span className="status-dot" />
+            {status}{phase === 'loading' && progress > 0 ? ` · %${Math.round(progress * 100)}` : ''}
+          </div>
+          <p className="hint">{HINTS[phase]}</p>
+
+          <div className="controls">
+            <button
+              className={`primary ${active ? 'end' : ''}`}
+              disabled={!supported || busy}
+              onClick={() => active ? stop() : start()}
+            >
+              {active ? <>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                Sohbeti bitir
+              </> : busy ? <>
+                <span className="spinner" aria-hidden="true" />
+                Ses motoru hazırlanıyor…
+              </> : <>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1a7 7 0 0 0 6-6.9h-2Z" /></svg>
+                Sohbeti başlat
+              </>}
+            </button>
+            {active && <button className="secondary" onClick={interrupt} disabled={!interruptible}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1a7 7 0 0 0 6-6.9h-2Z" /></svg>
+              Sözü al
+            </button>}
+          </div>
+
+          {supported === false && <p className="notice">Bu tarayıcı konuşma tanımayı desteklemiyor. Masaüstü Chrome veya Edge deneyin.</p>}
+          {error && <p className="notice" role="alert">{error}</p>}
+        </div>
+
+        <div className="transcript">
+          <div className="transcript-head">
+            <span>Sohbetimiz</span>
+            {active && <span className="live"><i aria-hidden="true" /> Canlı</span>}
+          </div>
+          <div className="transcript-body" ref={transcript} role="log" aria-label="Sohbet metni">
+            {messages.length === 0 && !interim ? <div className="empty">
+              <p>Bir yerden başla. Örneğin:</p>
+              <ul>{PROMPTS.map(p => <li key={p}>“{p}”</li>)}</ul>
+            </div> : <>
+              {messages.map((m, i) => <div className={`message ${m.role}`} key={i}>
+                <span className="who">{m.role === 'user' ? 'Sen' : 'Yapay zekâ'}</span>
+                <p className={streaming && i === messages.length - 1 ? 'streaming' : ''}>{m.content}</p>
+              </div>)}
+              {interim && <div className="message user partial">
+                <span className="who">Sen</span>
+                <p>{interim}…</p>
+              </div>}
+            </>}
+          </div>
+        </div>
+
+        <div className="call-footer">
+          <span><i aria-hidden="true" /> EMA · {backend || 'cihazında çalışır'}</span>
+          <span>Türkçe · tr-TR</span>
+        </div>
       </div>
     </section>
-    <section className="bottom-grid">
-      <div className="prompts"><p className="eyebrow">BİRAZ İLHAM</p><h2>Bir yerden başla.</h2><p>“Bana şaşırtıcı bir şey anlat.”</p><p>“Hafta sonu için birlikte plan yapalım.”</p><p>“Aklımda bir fikir var, konuşalım mı?”</p></div>
-      <div className="transcript"><div className="transcript-heading"><p className="eyebrow">SOHBETİMİZ</p><span>CANLI KONUŞMA METNİ</span></div><div className="transcript-body" ref={transcript} role="log" aria-label="Sohbet metni">{messages.length === 0 && !interim ? <p className="empty">Senin ve bizim sözlerimiz burada görünecek.<br /><span>Yazmak yok. Üye olmak yok.</span></p> : <>{messages.map((m, i) => <div className={`message ${m.role}`} key={i}><span>{m.role === 'user' ? 'SEN' : 'YAPAY ZEKÂ'}</span><p>{m.content}</p></div>)}{interim && <div className="message partial"><span>SEN</span><p>{interim}…</p></div>}</>}</div></div>
-    </section>
-    <footer><p>Daha doğal iletişim için küçük bir deney.<br /><a href="/ema/NOTICE">EMA ve açık kaynak lisansları</a></p><p>Konuşma tanıma tarayıcı sağlayıcısı tarafından işlenebilir. Metin OpenRouter’a gönderilir.<br />EMA sesi tarayıcında üretir. Modeller Hugging Face’ten, çalışma motoru jsDelivr’dan indirilir. Kişisel bilgi paylaşma.</p><p>Yapay zekâyla sohbet ediyorsun; hata yapabilir.<br />Ücretsiz model ve tarayıcı desteği değişebilir.</p></footer>
+
+    {!active && <p className="download-note">İlk kullanımda yaklaşık 36 MB model ve çalışma dosyası indirilir; sonraki ziyaretler için önbelleğe alınır.</p>}
+
+    <footer>
+      <p>Daha doğal iletişim için küçük bir deney. <a href="/ema/NOTICE">EMA ve açık kaynak lisansları</a></p>
+      <p>Konuşma tanıma tarayıcı sağlayıcısı tarafından işlenebilir. Metin OpenRouter’a gönderilir. EMA sesi tarayıcında üretir. Modeller Hugging Face’ten, çalışma motoru jsDelivr’dan indirilir. Kişisel bilgi paylaşma.</p>
+      <p>Yapay zekâyla sohbet ediyorsun; hata yapabilir. Ücretsiz model ve tarayıcı desteği değişebilir.</p>
+    </footer>
   </main>;
 }
