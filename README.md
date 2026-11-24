@@ -58,17 +58,48 @@ credential and the webhook.
 .venv/bin/python voice_agent.py                    # call mode: always listening
 .venv/bin/python voice_agent.py --mode arm         # press Enter to talk
 .venv/bin/python voice_agent.py --mode ptt         # fixed length recording
+.venv/bin/python voice_agent.py --text             # type the questions, no microphone
 .venv/bin/python voice_agent.py --barge-in         # interrupt the answer
 .venv/bin/python voice_agent.py --no-play          # print only, no voice
+.venv/bin/python voice_agent.py --verbose          # full latency and VAD breakdown
+.venv/bin/python voice_agent.py --check            # only run the startup checks
+.venv/bin/python voice_agent.py --list-input-devices
 .venv/bin/python voice_agent.py --list-output-devices
 .venv/bin/python voice_agent.py --output-device "Mac mini Hoparlörü"
 ```
+
+Every start runs a short checklist (ffmpeg, whisper.cpp, the model, the
+microphone, n8n) and says how to fix what is missing. During a call the
+terminal shows the conversation and one live status line:
+
+```
+  DemoShop Voice Agent · call mode
+  ────────────────────────────────────
+  ✓ ffmpeg       /opt/homebrew/bin/ffmpeg
+  ✓ whisper.cpp  /opt/homebrew/bin/whisper-cli
+  ✓ model        ggml-base.en.bin
+  ✓ microphone   :0 JBL VIBE BEAM
+  ✓ n8n          localhost:5678
+  ✓ voice        af_heart ready in 1.0s
+  session 3f9c2a1b · mic :0 · turn ends after 800 ms of silence · barge-in off
+
+  You    Where is my order 1001?
+
+  Agent  Your order #1001 shipped on Monday and should arrive by Thursday.
+         stt 0.31 · n8n 0.05 · voice 0.42  →  first audio in 0.78s
+
+  ● Listening   ▮▮▮▯▯▯▯▯▯▯▯▯▯▯
+```
+
+Colour and the live line are switched off automatically when the output is
+not a terminal; `NO_COLOR=1` or `--no-color` turn colour off as well.
 
 ## Repository layout
 
 ```
 README.md  LICENSE  requirements.txt  .env.example  .github/
 voice_agent.py             client: capture, transcription, playback, call loop
+ui.py                      terminal presentation: conversation, status line, checks
 vad_stream.py              resumable voice activity detection
 farewell.py                goodbye detection
 build_voice_workflow.py    generates the n8n workflow
@@ -98,6 +129,7 @@ docs/                      architecture, n8n setup, troubleshooting
 | `tests/test_vad.py` | the endpointer: threshold, noise floor, pauses, start clipping, breakdown |
 | `tests/test_call_mode.py` | the continuous call loop, turn after turn, hanging up on a goodbye |
 | `tests/test_farewell.py` | goodbye detection and the phrases that must not trigger it |
+| `tests/test_ui.py` | the terminal output: plain text in a pipe, wrapping, timing line, device listing |
 | `tests/stt_reliability.py` | synthesised speech -> whisper.cpp -> parser |
 | `tests/test_integration.py` | end to end over HTTP against freshly created isolated n8n workflows |
 | `tests/live_mic_test.py` | the physical microphone test, prints the timing of every stage |

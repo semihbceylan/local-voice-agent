@@ -7,19 +7,21 @@ Pipeline:
     -> n8n voice-agent webhook -> Kokoro TTS (loaded once) -> afplay
 
 Modes:
-    auto  Voice activity detection stops the recording automatically (default).
+    call  Always listening, the agent answers by itself (default).
+    arm   Press Enter, then speak; voice activity detection ends the turn.
     ptt   Fixed-duration push-to-talk, used as a fallback.
+    text  Type the questions instead of speaking them.
 
 Configuration is via CLI flags or environment variables. No secrets are used
 or stored by this client.
 """
 
 import argparse
-import collections
 import json
-import math
 import os
 import queue
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -30,21 +32,25 @@ import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Tuple
+from urllib.parse import urlparse
 
 import numpy as np
 import requests
 
 from farewell import farewell_response, is_farewell
+from ui import Console
 from vad_stream import (
     FRAME_MS,
     NoSpeechDetected,
     VadStream,
-    _is_stationary,
     _level_db,
-    _percentile,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+
+# Everything the person sees goes through this console. main() replaces it
+# with one configured from the command line.
+UI = Console()
 
 
 # --------------------------------------------------------------------------- #
@@ -143,9 +149,6 @@ class RecordingError(RuntimeError):
 # --------------------------------------------------------------------------- #
 # Audio capture
 # --------------------------------------------------------------------------- #
-
-FRAME_MS = 30
-
 
 def _ffmpeg_input_command(cfg: Config) -> list[str]:
     return [
@@ -314,14 +317,18 @@ def transcribe(cfg: Config, audio_path: str) -> Tuple[Optional[str], float]:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         elapsed = time.perf_counter() - start
         if result.returncode != 0:
-            print(f"  [ERROR] Transcription failed: {result.stderr.strip()}", file=sys.stderr)
+            UI.error(
+                "Transcription failed: " + (result.stderr.strip().splitlines() or ["?"])[-1],
+                hint="Check the model path (WHISPER_MODEL) or run "
+                     "`voice_agent.py --check`.",
+            )
             return None, elapsed
 
         txt_path = audio_path + ".txt"
         try:
             text = Path(txt_path).read_text(encoding="utf-8").strip()
         except OSError:
-            print("  [ERROR] Whisper produced no transcript file", file=sys.stderr)
+            UI.error("Whisper produced no transcript file")
             return None, elapsed
         finally:
             try:
@@ -341,15 +348,33 @@ def transcribe(cfg: Config, audio_path: str) -> Tuple[Optional[str], float]:
                 cleaned.append(line)
         return " ".join(cleaned).strip(), elapsed
     except subprocess.TimeoutExpired:
+        UI.error("Transcription timed out after 60s")
+        return None, time.perf_counter() - start
+    except FileNotFoundError:
+        UI.error(
+            f"whisper.cpp not found at {cfg.whisper_cli}",
+            hint="Install it with `brew install whisper-cpp` or set WHISPER_CLI.",
+        )
         return None, time.perf_counter() - start
     except Exception as exc:  # noqa: BLE001 - report and keep the loop alive
-        print(f"  [ERROR] Transcription exception: {exc}", file=sys.stderr)
+        UI.error(f"Transcription failed: {exc}")
         return None, time.perf_counter() - start
 
 
 # --------------------------------------------------------------------------- #
 # n8n
 # --------------------------------------------------------------------------- #
+
+N8N_DOWN_HINT = (
+    "n8n runs in Docker. Start Docker Desktop (`open -a Docker`), wait for "
+    "the daemon, then check `docker ps` shows the n8n container."
+)
+N8N_404_HINT = (
+    "The webhook is not registered. Make sure the workflow is active, or "
+    "redeploy it with ./scripts/deploy_workflow.sh (right after a deploy it "
+    "can answer 404 for a second)."
+)
+
 
 def send_to_n8n(cfg: Config, text: str) -> Tuple[Optional[str], float]:
     start = time.perf_counter()
@@ -361,19 +386,29 @@ def send_to_n8n(cfg: Config, text: str) -> Tuple[Optional[str], float]:
         )
         elapsed = time.perf_counter() - start
         if response.status_code != 200:
-            print(f"  [ERROR] n8n HTTP {response.status_code}: {response.text[:300]}", file=sys.stderr)
+            UI.error(
+                f"n8n answered HTTP {response.status_code}: {response.text[:200]}",
+                hint=N8N_404_HINT if response.status_code == 404 else "",
+            )
             return None, elapsed
         data = response.json()
         answer = data.get("response")
         if not isinstance(answer, str) or not answer.strip():
-            print(f"  [ERROR] Unexpected n8n response: {data}", file=sys.stderr)
+            UI.error(f"Unexpected n8n response: {str(data)[:200]}")
             return None, elapsed
         return answer.strip(), elapsed
     except requests.Timeout:
-        print("  [ERROR] n8n request timed out", file=sys.stderr)
+        UI.error(
+            f"n8n did not answer within {cfg.n8n_timeout_s:.0f}s",
+            hint="General questions go to Ollama; check that it is running "
+                 "and the model is pulled.",
+        )
+        return None, time.perf_counter() - start
+    except requests.ConnectionError:
+        UI.error(f"Cannot reach n8n at {cfg.webhook_url}", hint=N8N_DOWN_HINT)
         return None, time.perf_counter() - start
     except Exception as exc:  # noqa: BLE001
-        print(f"  [ERROR] n8n request exception: {exc}", file=sys.stderr)
+        UI.error(f"n8n request failed: {exc}")
         return None, time.perf_counter() - start
 
 
@@ -438,7 +473,7 @@ class KokoroTTS:
             sf.write(output_path, audio, sample_rate)
             return True, time.perf_counter() - start, len(audio) / sample_rate
         except Exception as exc:  # noqa: BLE001
-            print(f"  [ERROR] TTS generation failed: {exc}", file=sys.stderr)
+            UI.error(f"Speech synthesis failed: {exc}")
             return False, time.perf_counter() - start, 0.0
 
 
@@ -546,7 +581,7 @@ def warmup_output_device(cfg: Config) -> float:
             stream.write(data)
             stream.stop()
     except Exception as exc:  # noqa: BLE001
-        print(f"  [WARN] Could not warm up '{cfg.output_device}': {exc}", file=sys.stderr)
+        UI.warn(f"Could not warm up '{cfg.output_device}': {exc}")
         return 0.0
     return time.perf_counter() - start
 
@@ -557,12 +592,12 @@ def play_audio(cfg: Config, audio_path: str) -> Tuple[bool, float]:
         try:
             index = resolve_output_device(cfg.output_device)
         except RecordingError as exc:
-            print(f"  [ERROR] {exc}", file=sys.stderr)
+            UI.error(str(exc), hint="List the devices with --list-output-devices.")
             return False, 0.0
         try:
             return _play_with_sounddevice(cfg, audio_path, index)
         except Exception as exc:  # noqa: BLE001
-            print(f"  [ERROR] Playback on '{cfg.output_device}' failed: {exc}", file=sys.stderr)
+            UI.error(f"Playback on '{cfg.output_device}' failed: {exc}")
             return False, time.perf_counter() - start
     start = time.perf_counter()
     try:
@@ -573,11 +608,11 @@ def play_audio(cfg: Config, audio_path: str) -> Tuple[bool, float]:
         )
         elapsed = time.perf_counter() - start
         if result.returncode != 0:
-            print(f"  [ERROR] Playback failed: {result.stderr.decode(errors='replace')}", file=sys.stderr)
+            UI.error(f"Playback failed: {result.stderr.decode(errors='replace').strip()}")
             return False, elapsed
         return True, elapsed
     except Exception as exc:  # noqa: BLE001
-        print(f"  [ERROR] Playback exception: {exc}", file=sys.stderr)
+        UI.error(f"Playback failed: {exc}")
         return False, time.perf_counter() - start
 
 
@@ -643,6 +678,25 @@ class MicrophoneFrameSource:
         except queue.Empty:
             return None
 
+    @property
+    def closed(self) -> bool:
+        """True once ffmpeg has exited and every captured frame was read."""
+        return (
+            self.proc is not None
+            and self.proc.poll() is not None
+            and self.frames.empty()
+        )
+
+    def close_reason(self) -> str:
+        try:
+            if self.proc is not None and self.proc.stderr is not None:
+                text = self.proc.stderr.read().decode(errors="replace").strip()
+                if text:
+                    return text.splitlines()[-1]
+        except (OSError, ValueError):
+            pass
+        return "ffmpeg stopped delivering audio"
+
     def drain(self) -> int:
         """Throw away everything that piled up (used while the agent talks)."""
         dropped = 0
@@ -699,6 +753,13 @@ class WavFrameSource:
         if self.realtime:
             time.sleep(FRAME_MS / 1000.0)
         return frame
+
+    @property
+    def closed(self) -> bool:
+        return not self.loop and self._index >= len(self._frames)
+
+    def close_reason(self) -> str:
+        return f"end of {os.path.basename(self.path)}"
 
     def drain(self) -> int:
         return 0
@@ -765,6 +826,112 @@ def _play_with_barge_in(
     return interrupted, time.perf_counter() - start, kept
 
 
+
+# --------------------------------------------------------------------------- #
+# Shared turn helpers
+# --------------------------------------------------------------------------- #
+
+def prepare_tts(cfg: Config) -> KokoroTTS:
+    """Load and warm Kokoro once, and the output device if one is chosen."""
+    tts = KokoroTTS(cfg)
+    try:
+        with UI.working("Loading the voice"):
+            tts.warmup()
+        UI.check(
+            True, "voice",
+            f"{cfg.kokoro_voice} ready in {tts.load_seconds + tts.warmup_seconds:.1f}s",
+        )
+    except Exception as exc:  # noqa: BLE001
+        UI.check(
+            None, "voice", f"could not pre-load Kokoro: {exc}",
+            hint="The first answer will be slower. Run ./scripts/setup.sh if "
+                 "the error persists.",
+        )
+    if cfg.output_device:
+        with UI.working(f"Opening {cfg.output_device}"):
+            warm = warmup_output_device(cfg)
+        UI.check(True, "speaker", f"{cfg.output_device} ({warm:.2f}s)")
+    return tts
+
+
+def _ask(cfg: Config, tts: KokoroTTS, text: str, tts_path: str, speak: bool):
+    """
+    Send one question to n8n, show the answer and render its audio.
+
+    Returns (response, n8n_s, tts_s, audio_s) or None when the turn failed.
+    """
+    with UI.working("Thinking"):
+        response, n8n_s = send_to_n8n(cfg, text)
+    if response is None:
+        return None
+    if not speak:
+        UI.agent(response)
+        return response, n8n_s, 0.0, 0.0
+    with UI.working("Preparing the voice"):
+        ok, tts_s, audio_s = tts.synthesize(response, tts_path)
+    UI.agent(response)
+    if not ok:
+        return None
+    return response, n8n_s, tts_s, audio_s
+
+
+def _goodbye(cfg: Config, tts: KokoroTTS, tts_path: str, play: bool) -> None:
+    """The customer is closing the call: answer locally, never via the model."""
+    line = farewell_response(cfg.farewell_line or None)
+    ok = False
+    if play:
+        with UI.working("Preparing the voice"):
+            ok, _, audio_s = tts.synthesize(line, tts_path)
+    UI.agent(line)
+    if ok:
+        UI.speaking(audio_s, barge_in=False)
+        play_audio(cfg, tts_path)
+        UI.clear_status()
+
+
+def _turn_record(cfg: Config, mode: str, turn: int, capture_s: float, stt_s: float,
+                 n8n_s: float, tts_s: float, playback_s: float, transcript: str,
+                 response: str, **extra) -> dict:
+    return {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session_id": cfg.session_id,
+        "mode": mode,
+        "turn": turn,
+        "capture_s": capture_s,
+        "stt_s": stt_s,
+        "n8n_s": n8n_s,
+        "tts_s": tts_s,
+        "playback_s": playback_s,
+        "post_speech_ttfa_s": stt_s + n8n_s + tts_s,
+        "ttfa_s": capture_s + stt_s + n8n_s + tts_s,
+        "total_s": capture_s + stt_s + n8n_s + tts_s + playback_s,
+        "transcript": transcript,
+        "response_chars": len(response),
+        **extra,
+    }
+
+
+def _next_utterance(source, stream: VadStream) -> Optional[bytes]:
+    """Block until the endpointer delivers a turn; None when the input ended."""
+    while True:
+        frame = source.read(timeout=0.5)
+        if frame is None:
+            if getattr(source, "error", None) is not None:
+                raise source.error
+            if getattr(source, "closed", False):
+                return None
+            continue
+        utterance = stream.push(frame)
+        if utterance is not None:
+            UI.clear_status()
+            return utterance
+        UI.listening(source.level_db, hearing=stream.started)
+
+
+# --------------------------------------------------------------------------- #
+# Call mode
+# --------------------------------------------------------------------------- #
+
 def run_call(cfg: Config, source=None, play: bool = True) -> None:
     """
     Continuous listening, like a customer service call.
@@ -772,108 +939,77 @@ def run_call(cfg: Config, source=None, play: bool = True) -> None:
     The microphone stays open, the endpointer decides when a sentence is
     finished, and the agent answers without any key press.
     """
-    tts = KokoroTTS(cfg)
-    print("  [INFO] Loading and warming Kokoro TTS once...")
-    try:
-        tts.warmup()
-    except Exception as exc:  # noqa: BLE001
-        print(f"  [WARN] Could not pre-load Kokoro: {exc}", file=sys.stderr)
-    if cfg.output_device:
-        warm = warmup_output_device(cfg)
-        print(f"  [INFO] Output device '{cfg.output_device}' ready ({warm:.2f}s)")
-
+    tts = prepare_tts(cfg)
     source = source or MicrophoneFrameSource(cfg)
     stream = VadStream(cfg)
 
-    print("=" * 68)
-    print("  DemoShop Voice Agent - continuous call mode")
-    print("=" * 68)
-    print(f"  Session ID : {cfg.session_id}")
-    print(f"  Webhook    : {cfg.webhook_url}")
-    print(f"  Mic device : {cfg.audio_device} (AVFoundation, stays open)")
-    print(
-        f"  Turn end   : {cfg.vad_silence_ms} ms of silence "
-        f"(max {cfg.vad_max_seconds:.0f}s per turn)"
-    )
-    print(f"  Barge-in   : {'on' if cfg.barge_in else 'off (half duplex)'}")
-    print(f"  Latency log: {cfg.latency_log}")
-    print("-" * 68)
+    UI.facts([
+        ("session", cfg.session_id),
+        ("mic", cfg.audio_device),
+        ("turn ends after", f"{cfg.vad_silence_ms} ms of silence"),
+        ("barge-in", "on" if cfg.barge_in else "off"),
+        ("voice", "on" if play else "off"),
+    ])
+    UI.debug(f"webhook {cfg.webhook_url} · latency log {cfg.latency_log}")
 
     try:
         source.start()
     except Exception as exc:  # noqa: BLE001
-        print(f"  [ERROR] Could not open the microphone: {exc}", file=sys.stderr)
+        UI.error(
+            f"Could not open the microphone: {exc}",
+            hint="List the microphones with --list-input-devices and pick one "
+                 "with --device.",
+        )
         return
 
-    print("  [READY] Listening. Just start talking. Ctrl-C to hang up.")
+    UI.hint("Just start talking. Say goodbye or press Ctrl-C to hang up.")
     turn = 0
+    ended = "Call ended"
     try:
         while True:
-            utterance = None
-            while utterance is None:
-                frame = source.read(timeout=0.5)
-                if frame is None:
-                    if getattr(source, "error", None) is not None:
-                        raise source.error
-                    continue
-                utterance = stream.push(frame)
+            utterance = _next_utterance(source, stream)
             if utterance is None:
+                reason = source.close_reason() if hasattr(source, "close_reason") else ""
+                if isinstance(source, MicrophoneFrameSource):
+                    UI.error(
+                        f"The microphone stopped: {reason}",
+                        hint="Was the headset disconnected? Check "
+                             "--list-input-devices and start again.",
+                    )
+                    ended = "Call dropped"
                 break
 
             turn += 1
             metrics = stream.last_metrics
+            capture_s = metrics.get("wall_span_s", 0.0)
             with tempfile.TemporaryDirectory(prefix="voice_agent_") as tmp:
                 record_path = os.path.join(tmp, "input.wav")
                 tts_path = os.path.join(tmp, "response.wav")
                 write_wav(record_path, utterance, cfg.sample_rate, cfg.channels)
 
-                transcript, stt_s = transcribe(cfg, record_path)
+                with UI.working("Transcribing"):
+                    transcript, stt_s = transcribe(cfg, record_path)
                 if not transcript:
-                    print("  [STT] Nothing understood, still listening.")
+                    UI.info("(didn't catch that, still listening)")
                     source.drain()
                     continue
-                print(f'  [STT] "{transcript}" ({stt_s:.2f}s)')
+                UI.user(transcript)
 
                 if cfg.farewell_enabled and is_farewell(transcript):
-                    # The customer is closing the call: answer locally and
-                    # hang up instead of waking the language model.
-                    line = farewell_response(cfg.farewell_line or None)
-                    print(f'  [BYE] "{transcript}" -> closing the call')
-                    if play:
-                        ok, tts_s, audio_s = tts.synthesize(line, tts_path)
-                        if ok:
-                            print(f"  [PLAY] {line}")
-                            play_audio(cfg, tts_path)
-                    else:
-                        tts_s = 0.0
-                    print_latency({
-                        "capture_s": metrics.get("wall_span_s", 0.0),
-                        "stt_s": stt_s,
-                        "n8n_s": 0.0,
-                        "tts_s": tts_s,
-                        "playback_s": 0.0,
-                        "post_speech_ttfa_s": stt_s + tts_s,
-                        "ttfa_s": metrics.get("wall_span_s", 0.0) + stt_s + tts_s,
-                        "total_s": metrics.get("wall_span_s", 0.0) + stt_s + tts_s,
-                    })
+                    _goodbye(cfg, tts, tts_path, play)
                     source.drain()
-                    print("  [CALL ENDED] Goodbye!")
-                    return
+                    break
 
-                response, n8n_s = send_to_n8n(cfg, transcript)
-                if response is None:
+                answer = _ask(cfg, tts, transcript, tts_path, speak=True)
+                if answer is None:
                     source.drain()
                     continue
-                preview = response if len(response) <= 160 else response[:157] + "..."
-                print(f'  [N8N] "{preview}" ({n8n_s:.2f}s)')
+                response, n8n_s, tts_s, audio_s = answer
 
-                ok, tts_s, audio_s = tts.synthesize(response, tts_path)
-                if not ok:
-                    source.drain()
-                    continue
-
+                interrupted = False
+                playback_s = 0.0
                 if play:
-                    print(f"  [PLAY] {audio_s:.2f}s of audio")
+                    UI.speaking(audio_s, cfg.barge_in)
                     if cfg.barge_in:
                         interrupted, playback_s, kept = _play_with_barge_in(
                             cfg, tts_path, source, stream,
@@ -888,41 +1024,25 @@ def run_call(cfg: Config, source=None, play: bool = True) -> None:
                         # agent talks, so the answer cannot trigger itself.
                         source.drain()
                         _, playback_s = play_audio(cfg, tts_path)
-                        interrupted = False
                         # Drop the echo of our own answer.
                         source.drain()
+                    UI.clear_status()
                 else:
                     source.drain()
-                    playback_s = 0.0
-                    interrupted = False
 
-            total_s = metrics.get("wall_span_s", 0.0) + stt_s + n8n_s + tts_s + playback_s
-            rows = {
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "session_id": cfg.session_id,
-                "mode": "call",
-                "turn": turn,
-                "capture_s": metrics.get("wall_span_s", 0.0),
-                "stt_s": stt_s,
-                "n8n_s": n8n_s,
-                "tts_s": tts_s,
-                "playback_s": playback_s,
-                "interrupted": interrupted,
-                "post_speech_ttfa_s": stt_s + n8n_s + tts_s,
-                "ttfa_s": metrics.get("wall_span_s", 0.0) + stt_s + n8n_s + tts_s,
-                "total_s": total_s,
-                "transcript": transcript,
-                "response_chars": len(response),
-                "vad": metrics,
-            }
-            print_latency(rows)
+            rows = _turn_record(
+                cfg, "call", turn, capture_s, stt_s, n8n_s, tts_s, playback_s,
+                transcript, response, interrupted=interrupted, vad=metrics,
+            )
+            UI.timing(rows)
             log_latency(cfg, rows)
-            if interrupted:
-                print("  [BARGE-IN] The customer interrupted, listening again.")
     except KeyboardInterrupt:
-        print("\n  Bye.")
+        pass
     finally:
         source.stop()
+        UI.clear_status()
+        UI.summary(ended)
+
 
 # --------------------------------------------------------------------------- #
 # Latency log
@@ -934,72 +1054,33 @@ def log_latency(cfg: Config, record: dict) -> None:
         with cfg.latency_log.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
     except OSError as exc:
-        print(f"  [WARN] Could not write latency log: {exc}", file=sys.stderr)
-
-
-def print_latency(rows: dict) -> None:
-    print(
-        "  [LATENCY] "
-        f"capture:{rows['capture_s']:.2f}s "
-        f"stt:{rows['stt_s']:.2f}s "
-        f"n8n:{rows['n8n_s']:.2f}s "
-        f"tts:{rows['tts_s']:.2f}s "
-        f"play:{rows['playback_s']:.2f}s | "
-        f"first audio after speech:{rows['post_speech_ttfa_s']:.2f}s "
-        f"first audio from arm:{rows['ttfa_s']:.2f}s "
-        f"total:{rows['total_s']:.2f}s"
-    )
+        UI.warn(f"Could not write the latency log: {exc}")
 
 
 # --------------------------------------------------------------------------- #
-# Main loop
+# Arm / push-to-talk mode
 # --------------------------------------------------------------------------- #
-
-def print_banner(cfg: Config, mode: str, tts: KokoroTTS) -> None:
-    print("=" * 68)
-    print("  DemoShop Voice Agent - fully local")
-    print("=" * 68)
-    print(f"  Session ID : {cfg.session_id}")
-    print(f"  Webhook    : {cfg.webhook_url}")
-    print(f"  Mic device : {cfg.audio_device} (AVFoundation)")
-    print(f"  Mode       : {mode}")
-    if mode == "auto":
-        print(
-            f"  VAD        : silence {cfg.vad_silence_ms} ms, "
-            f"max {cfg.vad_max_seconds:.0f}s, min speech {cfg.vad_min_speech_ms} ms, "
-            f"noise margin {cfg.vad_noise_margin_db:.0f} dB, snr gap {cfg.vad_snr_gap_db:.0f} dB"
-        )
-    else:
-        print(f"  Record     : fixed {cfg.ptt_duration:.1f}s")
-    print(
-        f"  Kokoro     : {cfg.kokoro_repo} / {cfg.kokoro_voice} "
-        f"(loaded once, {tts.load_seconds:.2f}s load + {tts.warmup_seconds:.2f}s warm-up, speed {cfg.kokoro_speed})"
-    )
-    print(f"  Latency log: {cfg.latency_log}")
-    print("-" * 68)
-
 
 def run(cfg: Config, mode: str) -> None:
-    tts = KokoroTTS(cfg)
-    print("  [INFO] Loading and warming Kokoro TTS once...")
-    try:
-        tts.warmup()
-    except Exception as exc:  # noqa: BLE001
-        print(f"  [WARN] Could not pre-load Kokoro: {exc}", file=sys.stderr)
-    if cfg.output_device:
-        warm = warmup_output_device(cfg)
-        print(f"  [INFO] Output device '{cfg.output_device}' ready ({warm:.2f}s)")
-
-    print_banner(cfg, mode, tts)
+    tts = prepare_tts(cfg)
     vad_available = mode == "auto"
+    UI.facts([
+        ("session", cfg.session_id),
+        ("mic", cfg.audio_device),
+        ("turn", f"ends after {cfg.vad_silence_ms} ms of silence"
+                 if vad_available else f"fixed {cfg.ptt_duration:.1f}s"),
+    ])
+    UI.debug(f"webhook {cfg.webhook_url} · latency log {cfg.latency_log}")
 
+    turn = 0
+    ended = "Session ended"
     while True:
         try:
-            prompt = "\n[Enter to speak" + (", 'p' push-to-talk" if vad_available else "") + ", q to quit] > "
-            choice = input(prompt).strip().lower()
-            if choice == "q":
-                print("\nGoodbye!")
-                return
+            keys = "Enter to talk" + (" · p fixed-length" if vad_available else "") + " · q quit"
+            print()
+            choice = input(f"  {UI.s.dim(keys)} ").strip().lower()
+            if choice in ("q", "quit", "exit"):
+                break
 
             turn_mode = "ptt" if choice == "p" else ("vad" if vad_available else "ptt")
 
@@ -1010,119 +1091,287 @@ def run(cfg: Config, mode: str) -> None:
                 capture_start = time.perf_counter()
                 vad_metrics: dict = {}
                 if turn_mode == "vad":
-                    print("  [REC] Listening... speak now (auto-stops on silence)")
                     try:
-                        _, capture_s, vad_metrics = record_vad(cfg, record_path)
-                        print(
-                            "  [REC] VAD "
-                            f"open {vad_metrics.get('device_open_s', 0):.2f}s | "
-                            f"wait {vad_metrics.get('wait_s', 0):.2f}s | "
-                            f"speech {vad_metrics.get('speech_s', 0):.2f}s | "
-                            f"silence {vad_metrics.get('end_of_speech_delay_ms', 0) / 1000:.2f}s | "
-                            f"stop {vad_metrics.get('stop_reason', '?')} | "
-                            f"capture {capture_s:.2f}s"
+                        with UI.working("Listening, speak now"):
+                            _, capture_s, vad_metrics = record_vad(cfg, record_path)
+                        UI.debug(
+                            f"vad: open {vad_metrics.get('device_open_s', 0):.2f}s · "
+                            f"wait {vad_metrics.get('wait_s', 0):.2f}s · "
+                            f"speech {vad_metrics.get('speech_s', 0):.2f}s · "
+                            f"stop {vad_metrics.get('stop_reason', '?')}"
                         )
                     except NoSpeechDetected as exc:
-                        print(f"  [REC] {exc}. Nothing sent.")
+                        UI.info(f"({exc}, nothing sent)")
                         continue
                     except Exception as exc:  # noqa: BLE001
-                        print(f"  [WARN] VAD capture unavailable: {exc}")
-                        print(f"  [REC] Falling back to {cfg.ptt_duration:.1f}s push-to-talk")
+                        UI.warn(
+                            f"Voice detection unavailable: {exc}",
+                            hint=f"Falling back to {cfg.ptt_duration:.1f}s fixed-length recording.",
+                        )
                         vad_available = False
                         turn_mode = "ptt"
                         try:
-                            _, _ = record_fixed(cfg, record_path, cfg.ptt_duration)
+                            with UI.working(f"Recording {cfg.ptt_duration:.0f}s, speak now"):
+                                record_fixed(cfg, record_path, cfg.ptt_duration)
                         except RecordingError as fallback_exc:
-                            print(f"  [ERROR] Push-to-talk fallback failed: {fallback_exc}", file=sys.stderr)
+                            UI.error(f"Recording failed: {fallback_exc}")
                             continue
                         capture_s = time.perf_counter() - capture_start
                 else:
-                    print(f"  [REC] Recording for {cfg.ptt_duration:.1f}s... speak now")
-                    _, _ = record_fixed(cfg, record_path, cfg.ptt_duration)
+                    with UI.working(f"Recording {cfg.ptt_duration:.0f}s, speak now"):
+                        record_fixed(cfg, record_path, cfg.ptt_duration)
                     capture_s = time.perf_counter() - capture_start
 
-                text, stt_s = transcribe(cfg, record_path)
-                if text is None:
-                    continue
+                with UI.working("Transcribing"):
+                    text, stt_s = transcribe(cfg, record_path)
                 if not text:
-                    print("  [STT] No speech detected")
+                    if text is not None:
+                        UI.info("(no speech detected)")
                     continue
-                print(f'  [STT] "{text}" ({stt_s:.2f}s)')
+                UI.user(text)
 
                 if cfg.farewell_enabled and is_farewell(text):
-                    line = farewell_response(cfg.farewell_line or None)
-                    print(f'  [BYE] "{text}" -> closing the call')
-                    ok, tts_s, _ = tts.synthesize(line, tts_path)
-                    if ok:
-                        print(f"  [PLAY] {line}")
-                        play_audio(cfg, tts_path)
-                    print("  [CALL ENDED] Goodbye!")
-                    return
+                    _goodbye(cfg, tts, tts_path, play=True)
+                    break
 
-                response, n8n_s = send_to_n8n(cfg, text)
-                if response is None:
+                answer = _ask(cfg, tts, text, tts_path, speak=True)
+                if answer is None:
                     continue
-                preview = response if len(response) <= 160 else response[:157] + "..."
-                print(f'  [N8N] "{preview}" ({n8n_s:.2f}s)')
+                response, n8n_s, tts_s, audio_s = answer
 
-                ok, tts_s, audio_s = tts.synthesize(response, tts_path)
-                if not ok:
-                    continue
-                print(f"  [TTS] {audio_s:.2f}s of audio in {tts_s:.2f}s (warm model)")
-
-                print("  [PLAY] Playing response...")
+                UI.speaking(audio_s, barge_in=False)
                 ok, playback_s = play_audio(cfg, tts_path)
+                UI.clear_status()
 
-                total_s = capture_s + stt_s + n8n_s + tts_s + playback_s
-                rows = {
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    "session_id": cfg.session_id,
-                    "mode": turn_mode,
-                    "capture_s": capture_s,
-                    "stt_s": stt_s,
-                    "n8n_s": n8n_s,
-                    "tts_s": tts_s,
-                    "playback_s": playback_s,
-                    "playback_ok": ok,
-                    "audio_duration_s": audio_s,
-                    "post_speech_ttfa_s": stt_s + n8n_s + tts_s,
-                    "ttfa_s": capture_s + stt_s + n8n_s + tts_s,
-                    "total_s": total_s,
-                    "transcript": text,
-                    "response_chars": len(response),
-                    "vad": vad_metrics,
-                }
-                print_latency(rows)
+                turn += 1
+                rows = _turn_record(
+                    cfg, turn_mode, turn, capture_s, stt_s, n8n_s, tts_s, playback_s,
+                    text, response, playback_ok=ok, audio_duration_s=audio_s,
+                    vad=vad_metrics,
+                )
+                UI.timing(rows)
                 log_latency(cfg, rows)
-                if not ok:
-                    continue
 
-        except KeyboardInterrupt:
-            print("\n\nInterrupted. Goodbye!")
-            return
-        except EOFError:
-            print("\nGoodbye!")
-            return
+        except (KeyboardInterrupt, EOFError):
+            break
         except RecordingError as exc:
-            print(f"  [ERROR] Recording failed: {exc}", file=sys.stderr)
+            UI.error(
+                f"Recording failed: {exc}",
+                hint="List the microphones with --list-input-devices.",
+            )
         except Exception as exc:  # noqa: BLE001 - keep the interactive loop alive
-            print(f"  [ERROR] {exc}", file=sys.stderr)
+            UI.error(str(exc))
+    UI.clear_status()
+    UI.summary(ended)
+
+
+# --------------------------------------------------------------------------- #
+# Text mode
+# --------------------------------------------------------------------------- #
+
+def run_text(cfg: Config, play: bool = True) -> None:
+    """Type the questions; the answers are shown and (optionally) spoken."""
+    tts = prepare_tts(cfg) if play else KokoroTTS(cfg)
+    UI.facts([("session", cfg.session_id), ("voice", "on" if play else "off")])
+    UI.debug(f"webhook {cfg.webhook_url} · latency log {cfg.latency_log}")
+    UI.hint("Type a question and press Enter. Ctrl-D or 'bye' to leave.")
+
+    turn = 0
+    while True:
+        try:
+            print()
+            text = input(f"  {UI.s.cyan('You')}    ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            break
+        if not text:
+            continue
+        try:
+            with tempfile.TemporaryDirectory(prefix="voice_agent_") as tmp:
+                tts_path = os.path.join(tmp, "response.wav")
+                if cfg.farewell_enabled and is_farewell(text):
+                    _goodbye(cfg, tts, tts_path, play)
+                    break
+                answer = _ask(cfg, tts, text, tts_path, speak=play)
+                if answer is None:
+                    continue
+                response, n8n_s, tts_s, audio_s = answer
+                playback_s = 0.0
+                if play:
+                    UI.speaking(audio_s, barge_in=False)
+                    _, playback_s = play_audio(cfg, tts_path)
+                    UI.clear_status()
+            turn += 1
+            rows = _turn_record(
+                cfg, "text", turn, 0.0, 0.0, n8n_s, tts_s, playback_s, text, response,
+            )
+            UI.timing(rows)
+            log_latency(cfg, rows)
+        except KeyboardInterrupt:
+            UI.clear_status()
+            UI.info("(interrupted)")
+    UI.clear_status()
+    UI.summary("Session ended")
+
+
+# --------------------------------------------------------------------------- #
+# Startup checks and devices
+# --------------------------------------------------------------------------- #
+
+def list_input_devices(cfg: Config) -> Optional[list[tuple[int, str]]]:
+    """The AVFoundation microphones as (index, name); None if ffmpeg failed."""
+    try:
+        result = subprocess.run(
+            [cfg.ffmpeg, "-hide_banner", "-f", "avfoundation",
+             "-list_devices", "true", "-i", ""],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return parse_avfoundation_devices(result.stderr)
+
+
+def parse_avfoundation_devices(listing: str) -> list[tuple[int, str]]:
+    """The audio section of `ffmpeg -f avfoundation -list_devices true`."""
+    devices: list[tuple[int, str]] = []
+    in_audio = False
+    for line in listing.splitlines():
+        if "AVFoundation audio devices" in line:
+            in_audio = True
+            continue
+        if "AVFoundation video devices" in line:
+            in_audio = False
+            continue
+        if in_audio and "] [" in line:
+            tail = line.split("] [", 1)[1]
+            index, _, name = tail.partition("] ")
+            if index.isdigit():
+                devices.append((int(index), name.strip()))
+    return devices
+
+
+NO_MIC_HINT = (
+    "Connect the headset, and allow the terminal app to use the microphone "
+    "in System Settings > Privacy & Security > Microphone."
+)
+
+
+def _n8n_reachable(url: str, timeout: float = 1.0) -> bool:
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def preflight(cfg: Config, mode: str) -> Tuple[bool, bool]:
+    """
+    Print the startup checklist.
+
+    Returns (can_run, all_ok). can_run is False when something the chosen
+    mode cannot work without is missing; all_ok also counts warnings.
+    """
+    can_run = True
+    all_ok = True
+    uses_mic = mode != "text"
+
+    if uses_mic:
+        ffmpeg = shutil.which(cfg.ffmpeg)
+        UI.check(bool(ffmpeg), "ffmpeg", ffmpeg or "not found",
+                 hint="Install it with `brew install ffmpeg`.")
+        can_run &= bool(ffmpeg)
+
+        whisper = (
+            cfg.whisper_cli if os.access(cfg.whisper_cli, os.X_OK)
+            else shutil.which(cfg.whisper_cli)
+        )
+        UI.check(bool(whisper), "whisper.cpp", whisper or f"not found at {cfg.whisper_cli}",
+                 hint="Install it with `brew install whisper-cpp` or set WHISPER_CLI.")
+        can_run &= bool(whisper)
+
+        model = Path(cfg.whisper_model)
+        UI.check(model.is_file(), "model",
+                 model.name if model.is_file() else f"missing: {model}",
+                 hint="./scripts/setup.sh downloads it (141 MB).")
+        can_run &= model.is_file()
+
+        if ffmpeg and cfg.audio_input_format == "avfoundation":
+            devices = list_input_devices(cfg)
+            wanted = cfg.audio_device.lstrip(":")
+            if devices == []:
+                UI.check(
+                    None, "microphone", "ffmpeg sees no audio input at all",
+                    hint=NO_MIC_HINT,
+                )
+                all_ok = False
+            elif devices is not None and wanted.isdigit():
+                names = dict(devices)
+                found = int(wanted) in names
+                UI.check(
+                    found, "microphone",
+                    f"{cfg.audio_device} {names[int(wanted)]}" if found
+                    else f"no audio device {cfg.audio_device}",
+                    hint="Available: " + ", ".join(f":{i} {n}" for i, n in devices)
+                    + ". Choose one with --device.",
+                )
+                can_run &= found
+
+    n8n_ok = _n8n_reachable(cfg.webhook_url)
+    netloc = urlparse(cfg.webhook_url).netloc or cfg.webhook_url
+    UI.check(True if n8n_ok else None, "n8n",
+             netloc if n8n_ok else f"nothing listening on {netloc}",
+             hint=N8N_DOWN_HINT)
+    all_ok &= n8n_ok
+
+    if cfg.output_device:
+        try:
+            resolve_output_device(cfg.output_device)
+        except Exception as exc:  # noqa: BLE001
+            UI.check(False, "speaker", str(exc),
+                     hint="List the devices with --list-output-devices.")
+            can_run = False
+
+    return can_run, all_ok and can_run
+
+
+# --------------------------------------------------------------------------- #
+# Command line
+# --------------------------------------------------------------------------- #
+
+MODE_LABELS = {
+    "call": "call mode",
+    "auto": "press Enter to talk",
+    "ptt": "fixed-length recording",
+    "text": "text mode",
+}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fully local DemoShop voice agent")
-    parser.add_argument(
-        "-m", "--mode", choices=["call", "arm", "auto", "ptt"],
-        default=_env("VOICE_MODE", "call"),
-        help="call = always listening (default), arm = press Enter to talk, ptt = fixed length",
+    parser = argparse.ArgumentParser(
+        description="Fully local DemoShop voice agent",
     )
+    parser.add_argument(
+        "-m", "--mode", choices=["call", "arm", "auto", "ptt", "text"],
+        default=_env("VOICE_MODE", "call"),
+        help="call = always listening, arm = press Enter to talk, "
+             "ptt = fixed length, text = type the questions",
+    )
+    parser.add_argument("--text", action="store_true", help="shortcut for --mode text")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="show the full latency and VAD breakdown")
+    parser.add_argument("--check", action="store_true",
+                        help="only run the startup checks and exit (non-zero on a problem)")
+    parser.add_argument("--no-color", action="store_true", help="plain output")
     parser.add_argument(
         "--barge-in", action="store_true",
         help="allow the customer to interrupt the answer (call mode)",
     )
     parser.add_argument(
         "--no-play", action="store_true",
-        help="do not speak the answers (call mode, useful while testing)",
+        help="do not speak the answers (useful while testing)",
     )
     parser.add_argument(
         "--no-farewell", action="store_true",
@@ -1141,23 +1390,30 @@ def parse_args() -> argparse.Namespace:
         help="list the available output devices and exit",
     )
     parser.add_argument(
-        "-d", "--duration", type=float, default=None,
-        help="Fixed push-to-talk duration in seconds (default 5)",
+        "--list-input-devices", action="store_true",
+        help="list the available microphones and exit",
     )
-    parser.add_argument("--session", type=str, default=None, help="Stable session ID")
+    parser.add_argument(
+        "-d", "--duration", type=float, default=None,
+        help="fixed push-to-talk duration in seconds (default 5)",
+    )
+    parser.add_argument("--session", type=str, default=None, help="stable session ID")
     parser.add_argument("--device", type=str, default=None, help="AVFoundation audio device, e.g. :0")
     parser.add_argument("--webhook", type=str, default=None, help="n8n voice webhook URL")
     parser.add_argument("--silence-ms", type=int, default=None, help="VAD end-of-speech silence (ms)")
     parser.add_argument("--max-seconds", type=float, default=None, help="VAD maximum recording time")
     parser.add_argument("--noise-margin-db", type=float, default=None,
-                        help="How far above the background a frame must be to count as speech")
+                        help="how far above the background a frame must be to count as speech")
     parser.add_argument("--snr-gap-db", type=float, default=None,
-                        help="How far below the speech level a frame must be to count as silence")
+                        help="how far below the speech level a frame must be to count as silence")
     return parser.parse_args()
 
 
 def main() -> None:
+    global UI
     args = parse_args()
+    UI = Console(color=False if args.no_color else None, verbose=args.verbose)
+
     cfg = Config()
     if args.duration is not None:
         cfg.ptt_duration = args.duration
@@ -1186,15 +1442,43 @@ def main() -> None:
 
     if args.list_output_devices:
         print("Output devices:")
+        default = _default_output_index()
         for device in list_output_devices():
-            marker = " (default)" if device["index"] == _default_output_index() else ""
+            marker = " (default)" if device["index"] == default else ""
             print(f"  [{device['index']}] {device['name']}  {device['rate']} Hz  {device['channels']} ch{marker}")
         return
 
-    if args.mode == "call":
+    if args.list_input_devices:
+        devices = list_input_devices(cfg)
+        if devices is None:
+            print("Could not ask ffmpeg for the devices (is ffmpeg installed?)", file=sys.stderr)
+            sys.exit(1)
+        if not devices:
+            print("No microphone found. " + NO_MIC_HINT)
+            sys.exit(1)
+        print("Microphones (use with --device):")
+        for index, name in devices:
+            marker = "  <- current" if cfg.audio_device == f":{index}" else ""
+            print(f"  :{index}  {name}{marker}")
+        return
+
+    mode = "text" if args.text else ("auto" if args.mode == "arm" else args.mode)
+
+    UI.title(f"DemoShop Voice Agent · {MODE_LABELS[mode]}")
+    can_run, all_ok = preflight(cfg, mode)
+    if args.check:
+        UI.hint("All checks passed." if all_ok else "Some checks need attention.")
+        sys.exit(0 if all_ok else 1)
+    if not can_run:
+        UI.error("Cannot start until the problems above are fixed.")
+        sys.exit(1)
+
+    if mode == "call":
         run_call(cfg, play=not args.no_play)
+    elif mode == "text":
+        run_text(cfg, play=not args.no_play)
     else:
-        run(cfg, "auto" if args.mode == "arm" else args.mode)
+        run(cfg, mode)
 
 
 if __name__ == "__main__":

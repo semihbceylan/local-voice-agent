@@ -60,11 +60,23 @@ start-up, so the first answer is not delayed by the device activation.
 ## "Invalid audio device index"
 
 ```bash
-ffmpeg -hide_banner -f avfoundation -list_devices true -i ""
+.venv/bin/python voice_agent.py --list-input-devices
 ```
 
-Use the index that is printed. The Bluetooth headset usually shows up as
-`[0]`.
+Use the index that is printed with `--device :N`. The Bluetooth headset
+usually shows up as `:0`. If the list is empty, the terminal app has no
+permission to use the microphone: System Settings > Privacy & Security >
+Microphone.
+
+## Start with the checklist
+
+```bash
+.venv/bin/python voice_agent.py --check
+```
+
+checks ffmpeg, whisper.cpp, the Whisper model, the microphone and whether
+anything is listening on the n8n port, and prints the fix for each problem.
+It exits non-zero when something needs attention.
 
 ## Nothing is recognised
 

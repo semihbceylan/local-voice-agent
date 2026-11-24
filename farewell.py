@@ -18,7 +18,7 @@ FAREWELL_PATTERNS = [
     r"have a (nice|great|good|wonderful|lovely|happy) (day|evening|morning|afternoon|night|one|weekend)",
     r"(good ?bye|goodbyes|bye ?bye|bye|ciao|ciao ciao|auf wiedersehen)",
     r"see you( (later|soon|around|tomorrow))?",
-    r"that'?s? (all|it|everything|that)",
+    r"that('?s?| is) (all|it|everything|that)",
     r"i('m| am|’m|’m) (done|finished|all set|all done|good to go)",
     r"nothing else",
     r"no ?(more|nothing) (else|for me)?",
