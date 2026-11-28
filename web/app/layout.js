@@ -1,3 +1,4 @@
+import { Analytics } from '@vercel/analytics/next';
 import { DM_Sans, Manrope } from 'next/font/google';
 import './globals.css';
 
@@ -19,5 +20,5 @@ export const viewport = {
 };
 
 export default function RootLayout({ children }) {
-  return <html lang="tr" className={`${body.variable} ${display.variable}`}><body>{children}</body></html>;
+  return <html lang="tr" className={`${body.variable} ${display.variable}`}><body>{children}<Analytics /></body></html>;
 }
